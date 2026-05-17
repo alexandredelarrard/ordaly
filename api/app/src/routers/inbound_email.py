@@ -1,7 +1,6 @@
 from pathlib import Path
 
 from fastapi import APIRouter, Request, status
-
 from src.schemas.inbound import InboundEmailAccepted
 from src.services.inbound_email import process_inbound_email_and_queue
 

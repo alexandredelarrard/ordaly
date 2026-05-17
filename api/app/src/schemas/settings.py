@@ -16,10 +16,7 @@ class AppSettings(BaseSettings):
 
     app_name: str = "CRE Underwriting Inbound Pipeline"
     log_level: str = "INFO"
-    # Directory for rotating log files (under Docker, mount host dir to this path — see compose)
     log_dir: Path = Field(default=Path(".log"))
-    
-    # Root for app data; ``incoming_documents`` is created under here. In Docker use /data + bind mount.
     data_root: Path = Field(default=Path("."))
 
     database_url: Optional[str] = None
@@ -33,6 +30,13 @@ class AppSettings(BaseSettings):
     secret_key_login: str = "dev-change-me-login"
 
     cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
+
+    # Outbound mail (SendGrid) — optional in dev
+    sendgrid_api_key: Optional[str] = None
+    sendgrid_from_email: Optional[str] = None
+    sendgrid_from_name: str = "Valartic"
+    # Set to "eu" only for EU regional SendGrid sub-users; leave unset for global/US keys
+    sendgrid_data_residency: Optional[str] = None
 
     def cors_origins_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]

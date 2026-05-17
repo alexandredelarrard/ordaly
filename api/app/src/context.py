@@ -34,7 +34,7 @@ def setup_logging() -> None:
         log_dir = (Path.cwd() / log_dir).resolve()
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    service = os.getenv("SERVICE_NAME", "app")
+    service = os.getenv("APP_NAME", "app")
     log_file = log_dir / f"ordaly-{service}.log"
 
     fmt = logging.Formatter(
@@ -66,8 +66,9 @@ class AppContext:
     """Runtime context: settings, logger, storage paths."""
 
     def __init__(self) -> None:
-        setup_logging()
+
         self.settings = get_settings()
+        setup_logging()
         self.log = logging.getLogger("ordaly")
         data = self.settings.data_root.expanduser()
         if not data.is_absolute():

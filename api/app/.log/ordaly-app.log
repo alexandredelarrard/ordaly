@@ -1,5 +1,0 @@
-2026-05-17 20:45:38,258 INFO [ordaly.context] Logging to /app/.log/ordaly-app.log (level=20)
-2026-05-17 20:45:52,121 INFO [ordaly.inbound] Inbound email from al dl <gardonfretillantdu86@gmail.com>
-2026-05-17 20:45:52,122 WARNING [ordaly.inbound] No multipart file parts; form keys: ['email', 'charsets', 'dkim', 'spam_score', 'to', 'from', 'sender_ip', 'SPF', 'spam_report', 'subject', 'envelope']
-2026-05-17 20:45:52,129 INFO [ordaly.inbound] Stored PDF from raw MIME /data/incoming_documents/Resume_Alexandre_de_Larrard___US.pdf
-2026-05-17 20:46:58,166 INFO [ordaly.context] Logging to /app/.log/ordaly-app.log (level=20)

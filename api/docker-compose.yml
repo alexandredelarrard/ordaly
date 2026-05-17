@@ -30,7 +30,8 @@ services:
     volumes:
       - ./app:/app
       - ./app/.log:/app/.log
-      - ./data:/data/incoming_documents
+      # Same as celery: host ./data → container /data so PDFs live in /data/incoming_documents/ in both
+      - ./data:/data
       - ./.env:/app/.env:ro
     command: >
       uvicorn main:app --host 0.0.0.0 --port 8000 --reload
