@@ -1,0 +1,66 @@
+# Ordaly API + Redis + Celery
+# Bind mounts:
+#   ./app       → app code (hot reload)
+#   ./app/.log  → log files (ordaly-api.log / ordaly-celery.log)
+#   ./data      → PDF inbox at DATA_ROOT/incoming_documents
+#   ./.env      → optional file for pydantic env_file (vars also loaded via env_file:)
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: ordaly_redis
+    ports:
+      - "6379:6379"
+    networks:
+      - ordaly_net
+
+  api:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    container_name: ordaly_api
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      SERVICE_NAME: api
+      CELERY_BROKER_URL: redis://redis:6379/0
+      DATA_ROOT: /data
+      LOG_DIR: /app/.log
+    volumes:
+      - ./app:/app
+      - ./app/.log:/app/.log
+      - ./data:/data/incoming_documents
+      - ./.env:/app/.env:ro
+    command: >
+      uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+    depends_on:
+      - redis
+    networks:
+      - ordaly_net
+
+  celery:
+    build:
+      context: .
+      dockerfile: celery/Dockerfile
+    container_name: ordaly_celery
+    env_file:
+      - .env
+    environment:
+      SERVICE_NAME: celery
+      CELERY_BROKER_URL: redis://redis:6379/0
+      DATA_ROOT: /data
+      LOG_DIR: /app/.log
+    volumes:
+      - ./app:/app
+      - ./app/.log:/app/.log
+      - ./data:/data
+      - ./.env:/app/.env:ro
+    depends_on:
+      - redis
+    networks:
+      - ordaly_net
+
+networks:
+  ordaly_net:
+    driver: bridge

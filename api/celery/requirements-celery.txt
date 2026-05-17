@@ -1,0 +1,2 @@
+# Celery worker — same app code; keep lean (add ML/pdf libs when parser is implemented)
+-r requirements.txt
