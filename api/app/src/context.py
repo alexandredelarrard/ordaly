@@ -18,7 +18,7 @@ class AppContext:
     def __init__(self, config: DictConfig) -> None:
 
         self.config = config
-        self.load_environment()
+        self._load_env()
         self._setup_logging()
 
         self.log = logging.getLogger("ordaly")
@@ -44,14 +44,14 @@ class AppContext:
 
         self.log = logging.getLogger(__name__)
 
-    def load_environment(self) -> None:
-        """Load ``.env`` into os.environ before ``AppSettings`` is built."""
-        if os.getenv("ENV_FILE"):
-            load_dotenv(os.environ["ENV_FILE"], override=False)
-            return
-        path = find_dotenv(usecwd=True)
-        if path:
-            load_dotenv(path, override=False)
+    def _load_env(self):
+        """Load environment variables"""
+        dot_env_file = find_dotenv(usecwd=True)
+        if dot_env_file:
+            load_dotenv(dot_env_file)
+            logging.info(f"Loaded environment file: {dot_env_file}")
+        else:
+            logging.warning("No .env file found")
 
     @property
     def log_dir(self) -> Path:
@@ -91,9 +91,6 @@ class AppContext:
     @property
     def sendgrid_from_name(self) -> Optional[str]:
         return os.environ.get("SENDGRID_FROM_NAME", None)
-    
-    def sendgrid_data_residency(self) -> Optional[str]:
-        return os.environ.get("SENDGRID_DATA_RESIDENCY", None)
     
     @property
     def google_api_key(self) -> Optional[str]:

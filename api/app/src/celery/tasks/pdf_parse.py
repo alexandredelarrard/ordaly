@@ -6,7 +6,7 @@ from src.celery.celery_app import celery
 from src.context import context, config
 from src.constants.limits import PDF_FILE_READY_POLL_SEC, PDF_FILE_READY_TIMEOUT_SEC
 from src.utils.file_ready import wait_until_file_ready
-from src.utils.outbound_mail import send_valartic_completion_email
+from src.services.outbound_mail import send_valartic_completion_email
 from src.celery.tasks.parse_orchestrator import PdfParseOrchestrator
 
 logger = logging.getLogger(__name__)
@@ -54,6 +54,7 @@ def parse_pdf_document(self, file_path: str, sender_email: str = "") -> dict[str
         task_id=task_id,
         document_name=path.name,
         parse_result=parse_result,
+        source_pdf_path=str(path.resolve()),
     )
 
     return {

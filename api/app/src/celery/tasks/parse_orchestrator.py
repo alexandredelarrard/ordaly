@@ -5,6 +5,9 @@ Tier 1 — Fast track: PyMuPDF + Camelot on financial-looking pages; CRE metadat
          LangChain/Gemini using :class:`PdfParseGptBridge` (same patterns as GptGetter, no DB).
 Tier 2 — Vision fallback: pdf2image + Gemini multimodal via ``PdfParseGptBridge.extract_table_from_page_image``.
 """
+# import os 
+# os.chdir("C:\\Users\\alarr\\Documents\\repos\\ordaly\\api\\app")
+
 from __future__ import annotations
 
 import io
@@ -20,7 +23,7 @@ from omegaconf import DictConfig
 from src.constants import parse_pipeline as PP
 from src.context import AppContext
 from src.gpt_extraction.pdf_parse_gpt_bridge import PdfParseGptBridge
-from src.schemas.parse_pipeline import MetadataFromText, metadata_to_flat_dict
+from src.utils.text_llm_excel import save_parse_excel_export
 
 logger = logging.getLogger(__name__)
 
@@ -224,39 +227,6 @@ class PdfParseOrchestrator:
                 )
         return results
 
-    # --- Output shaping --------------------------------------------------
-    @staticmethod
-    def build_email_extractions(
-        tier: str,
-        stats: dict[str, Any],
-        meta: Optional[MetadataFromText],
-        camelot: list[dict[str, Any]],
-        vision: list[dict[str, Any]],
-        google_configured: bool,
-    ) -> dict[str, Any]:
-        out: dict[str, Any] = {
-            "parse_tier": tier,
-            "pages": str(stats.get("page_count", "")),
-            "chars_extracted": str(stats.get("char_count", "")),
-            "camelot_tables": len(camelot),
-            "vision_pages": len(vision),
-        }
-        if meta:
-            out.update(metadata_to_flat_dict(meta))
-        if vision:
-            first = vision[0].get("vision") or {}
-            out["vision_page_kind"] = first.get("page_kind", "")
-            out["vision_sample_columns"] = ", ".join(
-                (first.get("columns") or [])[:8]
-            )
-        elif camelot and not vision:
-            out["notes"] = "Tables extracted locally (Camelot / PyMuPDF path)."
-        if not meta and not vision and not camelot and not google_configured:
-            out["notes"] = (
-                "Limited extraction — set GOOGLE_API_KEY for LLM metadata / vision."
-            )
-        return out
-
     # --- Public API ------------------------------------------------------
     def run(self, path: Path) -> dict[str, Any]:
         path = path.resolve()
@@ -269,19 +239,18 @@ class PdfParseOrchestrator:
                 "mock_extractions": {},
             }
 
-        full_text, page_texts, stats = self.extract_text_stats(path)
-        native = self.is_likely_native_pdf(full_text, stats)
-
-        tier = "fast_track"
+        tier = "text_only"
         camelot_tables: list[dict[str, Any]] = []
-        metadata_llm: Optional[MetadataFromText] = None
+        text_llm_by_schema: Optional[dict[str, Any]] = None
         vision_results: list[dict[str, Any]] = []
         errors: list[str] = []
 
-        metadata_llm = self._llm.extract_metadata_from_pdf_text(full_text)
-
+        #first step is to extract the metadata from the text and infos from camelot and pass to LLM
+        full_text, page_texts, stats = self.extract_text_stats(path)
+        native = self.is_likely_native_pdf(full_text, stats)
+        camelot_tables = self.run_camelot_financial_pass(path, page_texts)
+        
         if native:
-            camelot_tables = self.run_camelot_financial_pass(path, page_texts)
             coherent = self.tables_look_coherent(camelot_tables)
             if not coherent:
                 tier = "hybrid"
@@ -289,6 +258,7 @@ class PdfParseOrchestrator:
                 vision_results = self.vision_fallback_pages(
                     path, native=native, pages=page_texts, camelot_ok=False
                 )
+                camelot_tables = [result["vision"] for result in vision_results]
         else:
             tier = "vision_fallback"
             errors.append("low_text_native_pdf")
@@ -297,10 +267,22 @@ class PdfParseOrchestrator:
             )
             if not vision_results and self._ctx.google_api_key:
                 errors.append("vision_failed_or_no_pdf2image")
+            camelot_tables = [result["vision"] for result in vision_results]
 
-        google_on = bool(self._ctx.google_api_key)
-        mock_extractions = self.build_email_extractions(
-            tier, stats, metadata_llm, camelot_tables, vision_results, google_on
+        # create aggregated information from LLM
+        text_llm_by_schema = self._llm.extract_metadata_from_pdf_text(
+            full_text, camelot_tables
+        )
+
+        if "type_of_sale" in text_llm_by_schema.get("metadata_from_text", {}):
+            type_of_sale = text_llm_by_schema.get("metadata_from_text").get("type_of_sale")
+            if type_of_sale in ["auction", "auctions", "auction sale"]:
+                _, text_llm_by_schema['auction_information'] = self._llm.run_one_sync("auction_information", full_text, 
+                camelot_tables)
+                
+        excel_export_path = save_parse_excel_export(
+            text_llm_by_schema=text_llm_by_schema,
+            source_pdf_path=path,
         )
 
         return {
@@ -308,16 +290,21 @@ class PdfParseOrchestrator:
             "parser": "orchestrator_v1",
             "document_filename": path.name,
             "tier": tier,
-            "mock_extractions": mock_extractions,
-            "pipeline": {
-                "stats": stats,
-                "native_pdf_likely": native,
-                "camelot_tables": camelot_tables,
-                "vision_results": vision_results,
-                "metadata_llm": metadata_llm.model_dump() if metadata_llm else None,
-                "errors": errors,
-            },
+            "text_llm": text_llm_by_schema,
+            "excel_export_path": str(excel_export_path)
+            if excel_export_path
+            else None,
+            "metadata_llm": (text_llm_by_schema or {}).get("metadata_from_text"),
+            "errors": errors,
+            "native_pdf_likely": native,
+            "camelot_tables": camelot_tables,
+            "vision_results": vision_results,
         }
 
 if __name__ == "__main__":  # pragma: no cover
-    p = Path("test.pdf")
+    path = Path("test.pdf")
+    from src.context import config, context
+
+    self = PdfParseOrchestrator(context, config)
+    self._llm = PdfParseGptBridge(context, config)
+    self._llm.api_key = "AIzaSyBecWM-RogiYRAeE1mQ1El1b4JYXjctyh4"

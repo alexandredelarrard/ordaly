@@ -1,10 +1,9 @@
 import logging
 
 from celery.result import AsyncResult
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
 
-from src.auth import get_current_user
 from src.celery.celery_app import celery
 from src.schemas.tasks import TaskStatusResponse
 
@@ -19,8 +18,7 @@ class TaskIdBody(BaseModel):
 
 @router.post("/tasks/status", response_model=TaskStatusResponse)
 async def task_status(
-    body: TaskIdBody,
-    _user: dict = Depends(get_current_user),
+    body: TaskIdBody
 ):
     """Poll Celery task result (requires Bearer JWT)."""
     task = AsyncResult(body.task_id, app=celery)

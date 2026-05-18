@@ -5,22 +5,26 @@ without DB/SqlHelper (safe for Celery workers without Postgres).
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import concurrent.futures
 import logging
 from os.path import abspath, dirname
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate, PromptTemplate
 from langchain_google_genai import ChatGoogleGenerativeAI
 from omegaconf import DictConfig
 
+from src.constants.variables import schemas_dict
 from src.context import AppContext
 from src.gpt_extraction.utils_genai.customed_parser import RobustJSONParser
-from src.schemas.parse_pipeline import MetadataFromText, VisionTableExtraction
+from src.schemas.parse_pipeline import VisionTableExtraction
 
 logger = logging.getLogger(__name__)
+
 
 class PdfParseGptBridge:
     """
@@ -52,46 +56,102 @@ class PdfParseGptBridge:
     def _google_api_key(self) -> Optional[str]:
         return (self._ctx.google_api_key or "").strip() or None
 
-    def _metadata_chain(self):
-        if not self._google_api_key():
+    def _metadata_chain(self, schema_name: str):
+        if not self.api_key:
             return None
 
         system = self._read("parse_metadata_system_prompt.md")
         user = self._read("parse_metadata_prompt.md")
 
-        parser = PydanticOutputParser(pydantic_object=MetadataFromText)
+        if schema_name not in schemas_dict:
+            raise ValueError(f"Invalid schema name: {schema_name}")
+
+        parser = PydanticOutputParser(pydantic_object=schemas_dict[schema_name])
         robust = RobustJSONParser(parser)
         prompt = PromptTemplate(
             template=system + "\n\n" + user,
-            input_variables=["query"],
+            input_variables=["query", "camelot_tables"],
             partial_variables={
-                "_format": parser.get_format_instructions()
+                "_format": parser.get_format_instructions(),
             },
         )
         llm = ChatGoogleGenerativeAI(
             model=self.model_text,
-            google_api_key=self._google_api_key(),
+            google_api_key=self.api_key,
             temperature=self.temperature,
             max_output_tokens=self.max_token,
         )
         return prompt | llm | robust
 
-    def extract_metadata_from_pdf_text(self, text: str) -> Optional[MetadataFromText]:
-        """Tier-1 textual metadata — same role as GptGetter structured extract, single shot."""
-        chain = self._metadata_chain()
-        if chain is None:
-            self._log.debug("No GOOGLE_API_KEY — skip metadata LLM")
-            return None
+    def run_one_sync(self, schema_name: str, text: str, camelot_tables: list[dict[str, Any]]) -> tuple[str, Any | None]:
+        
+        snippet = text[:120_000]
+        camelot_tables_snippet = "\n".join([str(table) for table in camelot_tables[:20]]) if len(camelot_tables) > 0 else ""
+        
         try:
-            out = chain.invoke({"query": text[:120_000]})
-            if isinstance(out, MetadataFromText):
-                return out
-            return MetadataFromText.model_validate(out)
+            chain = self._metadata_chain(schema_name)
+            if chain is None:
+                return schema_name, None
+            out = chain.invoke({"query": snippet, "camelot_tables": camelot_tables_snippet})
+            model_cls = schemas_dict[schema_name]
+            if isinstance(out, model_cls):
+                return schema_name, out.model_dump()
+            return schema_name, model_cls.model_validate(out).model_dump()
         except Exception as exc:
-            self._log.exception("Metadata LLM failed: %s", exc)
-            return None
+            self._log.warning(
+                "Text LLM schema %s failed: %s",
+                schema_name,
+                exc,
+                exc_info=self._log.isEnabledFor(logging.DEBUG),
+            )
+            return schema_name, None
 
-    def _vision_chain(self):
+
+    async def extract_metadata_from_pdf_text_async(
+        self, text: str, camelot_tables: list[dict[str, Any]]
+    ) -> dict[str, Any | None]:
+        """
+        One LLM call per ``schemas_dict`` schema, in parallel.
+
+        Uses sync ``chain.invoke`` on the asyncio default thread pool (``asyncio.to_thread``).
+        ``ChatGoogleGenerativeAI.ainvoke`` is unreliable under ``asyncio.run`` / nested loops and
+        was returning failures for every schema while ``invoke`` works.
+        """
+        if not self.api_key:
+            self._log.warning(
+                "extract_metadata_from_pdf_text skipped: GOOGLE_API_KEY is missing or empty"
+            )
+            return dict.fromkeys(schemas_dict, None)
+
+        pairs = await asyncio.gather(
+            *(asyncio.to_thread(self.run_one_sync, name, text, camelot_tables) for name in schemas_dict)
+        )
+        return dict(pairs)
+
+    def extract_metadata_from_pdf_text(self, text: str, camelot_tables: list[dict[str, Any]]) -> dict[str, Any | None]:
+        """
+        Tier-1 text extraction: parallel LLM calls (``gather`` inside
+        :meth:`extract_metadata_from_pdf_text_async`). Blocks until all finish.
+        Camelot tables are passed to the LLM to help it extract the metadata.
+        """
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(self.extract_metadata_from_pdf_text_async(text, camelot_tables))
+
+        def _run_in_fresh_loop() -> dict[str, Any | None]:
+            return asyncio.run(self.extract_metadata_from_pdf_text_async(text, camelot_tables))
+
+        self._log.debug(
+            "extract_metadata_from_pdf_text: nested event loop — running parallel LLM "
+            "batch in a worker thread"
+        )
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(_run_in_fresh_loop).result()
+
+    def _vision_chain(self, model: Optional[str] = None):
+        if not self.api_key:
+            return None
 
         system = self._read("parse_vision_system_prompt.md")
         user = self._read("parse_vision_prompt.md")
@@ -110,9 +170,8 @@ class PdfParseGptBridge:
                 ),
             ]
         ).partial(_format=parser.get_format_instructions())
-
         llm = ChatGoogleGenerativeAI(
-            model=self.model_vision,
+            model=model or self.model_vision,
             google_api_key=self.api_key,
             temperature=self.temperature,
             max_output_tokens=self.max_token,
@@ -122,11 +181,13 @@ class PdfParseGptBridge:
     def extract_table_from_page_image(
         self,
         png_bytes: bytes,
-        page_label: str
+        page_label: str,
+        *,
+        use_pro: bool = False,
     ) -> Optional[VisionTableExtraction]:
         """Tier-2 vision: page image → structured table (Gemini multimodal)."""
-        
-        chain = self._vision_chain()
+        model = self.model_vision_pro if use_pro else self.model_vision
+        chain = self._vision_chain(model=model)
         if chain is None:
             self._log.debug("No GOOGLE_API_KEY — skip vision table LLM")
             return None

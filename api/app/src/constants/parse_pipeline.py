@@ -7,8 +7,8 @@ MIN_CHARS_NATIVE_LIKELY: int = 400
 MIN_ALNUM_RATIO: float = 0.45
 
 # --- Camelot ---
-MAX_CAMELOT_PAGES_PER_DOC: int = 12
-MAX_TABLE_ROWS_SANE: int = 500
+MAX_CAMELOT_PAGES_PER_DOC: int = 20
+MAX_TABLE_ROWS_SANE: int = 300
 MIN_TABLE_ROWS_MEANINGFUL: int = 2
 
 # --- Vision fallback (Gemini + pdf2image) ---
