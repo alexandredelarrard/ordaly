@@ -1,0 +1,5 @@
+data_root: /data
+seed: 4325
+log_level: INFO
+log_dir: /app/.log
+app_name: api

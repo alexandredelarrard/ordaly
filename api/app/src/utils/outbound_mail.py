@@ -6,7 +6,7 @@ from typing import Any
 from sendgrid import SendGridAPIClient
 from sendgrid.helpers.mail import Content, Email, Mail, To
 
-from src.context import get_settings
+from src.context import context
 from src.utils.email_address import normalize_email_address
 from src.utils.email_template_valartic import render_valartic_completion_email
 
@@ -49,9 +49,9 @@ def send_valartic_completion_email(
     parse_result: dict[str, Any],
 ) -> dict[str, Any]:
     """Send HTML completion e-mail; no API key → log only (dev/mock)."""
-    settings = get_settings()
-    api_key = _clean_sendgrid_api_key(settings.sendgrid_api_key or "")
-    from_email = (settings.sendgrid_from_email or "").strip()
+
+    api_key = _clean_sendgrid_api_key(context.sendgrid_api_key or "")
+    from_email = (context.sendgrid_from_email or "").strip()
 
     to_email = normalize_email_address(sender_raw)
     if not to_email:
@@ -84,7 +84,7 @@ def send_valartic_completion_email(
     try:
         sg = SendGridAPIClient(api_key)
         # Only for EU data residency sub-users; global keys get 401 if this is set incorrectly.
-        residency = (settings.sendgrid_data_residency or "").strip().lower()
+        residency = (context.sendgrid_data_residency or "").strip().lower()
         if residency == "eu":
             sg.set_sendgrid_data_residency("eu")
 
@@ -99,6 +99,7 @@ def send_valartic_completion_email(
                 body[:500] if isinstance(body, (bytes, bytearray)) else body,
             )
             return {"sent": False, "reason": "sendgrid_error", "status": status_code}
+
         logger.info(
             "Sent Valartic completion e-mail from=%s to=%s task=%s status=%s",
             from_email,
@@ -107,6 +108,7 @@ def send_valartic_completion_email(
             status_code,
         )
         return {"sent": True, "to": to_email, "status_code": status_code}
+
     except Exception as exc:
         err_msg = getattr(exc, "message", None) or str(exc)
         logger.exception("Failed to send outbound e-mail: %s", err_msg)

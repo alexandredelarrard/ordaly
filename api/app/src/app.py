@@ -5,7 +5,7 @@ import python_multipart
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from src.context import context
+from src.context import context, config
 from src.routers import health, inbound_email, tasks
 from src.utils.database import close_database, init_database
 
@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    db_url = context.settings.database_url
+    db_url = context.database_url
     if db_url:
         init_database(db_url)
         logger.info("Database engine initialized")
@@ -26,7 +26,7 @@ async def lifespan(app: FastAPI):
 
 def create_app() -> FastAPI:
     app = FastAPI(
-        title=context.settings.app_name,
+        title=context.config.app_name,
         description="CRE underwriting inbound pipeline",
         version="0.2.0",
         lifespan=lifespan,

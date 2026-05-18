@@ -8,12 +8,19 @@ WORKDIR /app
 COPY . /app
 
 RUN apt-get update &&\
-    apt-get install -y apt-utils &&\
-    apt-get install -y gcc
+    apt-get install -y --no-install-recommends \
+        gcc \
+        poppler-utils \
+        ghostscript \
+        qpdf \
+        libglib2.0-0 \
+        libgl1 \
+    && rm -rf /var/lib/apt/lists/*
 
-#Install requirements
+# Install requirements
 RUN pip install --upgrade pip
-RUN pip install -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt \
+    && python -c "import camelot; import cv2; print('camelot', camelot.__version__, 'cv2 OK')"
 
 EXPOSE 8000
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

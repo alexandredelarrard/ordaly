@@ -1,104 +1,131 @@
 import logging
 import os
 import sys
-from functools import lru_cache
-from logging.handlers import RotatingFileHandler
+from io import StringIO
 from pathlib import Path
 
-from dotenv import find_dotenv, load_dotenv
+from dotenv import load_dotenv, find_dotenv
+from omegaconf import DictConfig, OmegaConf
+from logging.config import dictConfig
+from typing import Optional
 
-from src.schemas.settings import AppSettings
-
-
-def load_environment() -> None:
-    """Load ``.env`` into os.environ before ``AppSettings`` is built."""
-    if os.getenv("ENV_FILE"):
-        load_dotenv(os.environ["ENV_FILE"], override=False)
-        return
-    path = find_dotenv(usecwd=True)
-    if path:
-        load_dotenv(path, override=False)
-
-
-@lru_cache
-def get_settings() -> AppSettings:
-    load_environment()
-    return AppSettings()
-
-
-def setup_logging() -> None:
-    settings = get_settings()
-    level = getattr(logging, settings.log_level.upper(), logging.INFO)
-    log_dir = settings.log_dir.expanduser()
-    if not log_dir.is_absolute():
-        log_dir = (Path.cwd() / log_dir).resolve()
-    log_dir.mkdir(parents=True, exist_ok=True)
-
-    service = os.getenv("APP_NAME", "app")
-    log_file = log_dir / f"ordaly-{service}.log"
-
-    fmt = logging.Formatter(
-        "%(asctime)s %(levelname)s [%(name)s] %(message)s"
-    )
-    root = logging.getLogger()
-    root.handlers.clear()
-
-    file_handler = RotatingFileHandler(
-        Path(log_file),
-        maxBytes=10 * 1024 * 1024,
-        backupCount=5,
-        encoding="utf-8",
-    )
-    file_handler.setFormatter(fmt)
-    root.addHandler(file_handler)
-
-    stream = logging.StreamHandler(sys.stdout)
-    stream.setFormatter(fmt)
-    root.addHandler(stream)
-
-    root.setLevel(level)
-
-    log = logging.getLogger("ordaly.context")
-    log.info("Logging to %s (level=%s)", str(log_file), level)
-
+from src.utils.config import read_config
+from src.utils.seed import set_seed
 
 class AppContext:
     """Runtime context: settings, logger, storage paths."""
 
-    def __init__(self) -> None:
+    def __init__(self, config: DictConfig) -> None:
 
-        self.settings = get_settings()
-        setup_logging()
+        self.config = config
+        self.load_environment()
+        self._setup_logging()
+
         self.log = logging.getLogger("ordaly")
-        data = self.settings.data_root.expanduser()
+        data = Path(self.config.data_root)
         if not data.is_absolute():
             data = (Path.cwd() / data).resolve()
         data.mkdir(parents=True, exist_ok=True)
+
+        # default values 
         self.incoming_dir = (data / "incoming_documents").resolve()
         self.incoming_dir.mkdir(parents=True, exist_ok=True)
 
+    def _setup_logging(self):
+        """Setup logging configuration"""
+
+        # create logging buffer
+        buffer = StringIO()
+        handler = logging.StreamHandler(buffer)
+        formatter = logging.Formatter(self.config.logging.formatters.file.format)
+        handler.setFormatter(formatter)
+        logging.root.addHandler(handler)
+        self.log_buffer = buffer
+
+        self.log = logging.getLogger(__name__)
+
+    def load_environment(self) -> None:
+        """Load ``.env`` into os.environ before ``AppSettings`` is built."""
+        if os.getenv("ENV_FILE"):
+            load_dotenv(os.environ["ENV_FILE"], override=False)
+            return
+        path = find_dotenv(usecwd=True)
+        if path:
+            load_dotenv(path, override=False)
+
     @property
     def log_dir(self) -> Path:
-        d = self.settings.log_dir.expanduser()
+        d = Path(self.config.log_dir)
         if not d.is_absolute():
             d = (Path.cwd() / d).resolve()
         return d
 
     @property
     def jwt_secret(self) -> str:
-        return self.settings.jwt_secret_key
+        return os.environ.get("JWT_SECRET_KEY")
 
     @property
     def jwt_algorithm(self) -> str:
-        return self.settings.jwt_algorithm
+        return os.environ.get("JWT_SECRET_KEY", "HS256")
 
     @property
     def jwt_access_token_expire_minutes(self) -> int:
-        return self.settings.jwt_access_expire_minutes
+        return os.environ.get("JWT_ACCESS_TOKEN_EXPIRE_MINUTES", 120)
 
     @property
     def cors_origins(self) -> list[str]:
-        return self.settings.cors_origins_list()
+        return os.environ.get("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",")
 
+    @property
+    def database_url(self) -> Optional[str]:
+        return os.environ.get("DATABASE_URL", None)
 
-context = AppContext()
+    @property
+    def sendgrid_api_key(self) -> Optional[str]:
+        return os.environ.get("SENDGRID_API_KEY", None)
+
+    @property
+    def sendgrid_from_email(self) -> Optional[str]:
+        return os.environ.get("SENDGRID_FROM_EMAIL", None)
+
+    @property
+    def sendgrid_from_name(self) -> Optional[str]:
+        return os.environ.get("SENDGRID_FROM_NAME", None)
+    
+    def sendgrid_data_residency(self) -> Optional[str]:
+        return os.environ.get("SENDGRID_DATA_RESIDENCY", None)
+    
+    @property
+    def google_api_key(self) -> Optional[str]:
+        return os.environ.get("GOOGLE_API_KEY", None)
+    
+    @property
+    def gemini_model_fast(self) -> Optional[str]:
+        return self.config.gemini_model_fast or "gemini-2.0-flash"
+    
+    @property
+    def gemini_model_pro(self) -> Optional[str]:
+        return self.config.gemini_model_pro or "gemini-2.0-flash"
+    
+
+def get_config_context(config_path: str):
+
+    try:
+        config = read_config(path="./configs")
+        log_root = Path(config.log_dir)
+        if not log_root.is_absolute():
+            log_root = (Path.cwd() / log_root).resolve()
+        # One canonical path for API + Celery workers (hour-stamped files in MakeFileHandler).
+        config.logging.handlers.file_handler.filename = str(log_root / "output.log")
+        dictConfig(OmegaConf.to_container(config.logging, resolve=True))
+        set_seed(config)
+
+    except FileNotFoundError:
+        print(f"configuration file {config_path} not found ", file=sys.stderr)
+        sys.exit(1)
+
+    context = AppContext(config=config)
+
+    return config, context
+
+config, context = get_config_context("./configs")
