@@ -160,8 +160,6 @@ EXCEL_FIELD_LABELS: dict[str, dict[str, str]] = {
         "percentage_black": "% Black",
         "percentage_asian": "% Asian",
         "percentage_other": "% Other",
-        "percentage_male": "% Male",
-        "percentage_female": "% Female",
         "vehicles_per_day": "Vehicles / day",
     },
     "auction_information": {
@@ -169,7 +167,7 @@ EXCEL_FIELD_LABELS: dict[str, dict[str, str]] = {
         "auction_date_end": "Auction end",
         "auction_location": "Location",
         "auction_type": "Auction type",
-        "auction_url": "URL",
+        "auction_url": "AuctionURL",
         "auction_has_reserved_price": "Reserve (Y/N)",
         "auction_reserved_price": "Reserve price ($)",
     },

@@ -21,7 +21,7 @@ class MetadataFromText(Metainfo):
     property_address: Optional[str] = Field(None, description="Address of the property: street, city, state, zip")
     city: Optional[str] = Field(None, description="Extracted city for quick filtering")
     state: Optional[str] = Field(None, description="Extracted 2-letter state code (ex: TX, NY)")
-    asset_type: Optional[str] = Field(None, description="Type of asset: office, retail, industrial, multifamily, hotel, etc.")
+    asset_type: Optional[str] = Field(None, description="Type of asset: office, retail, industrial, multifamily, hotel, vacant land.")
     asking_price: Optional[float] = Field(None, description="Asking price in USD, or 'Market/Inquire' / 'Unpriced'")
     lot_lease_type: Optional[str] = Field(None, description="Lot lease type: NNN, NN, Modified Gross, Gross, FSG")
     type_of_sale: Optional[str] = Field(None, description="Type of sale: auction or private sale.")
@@ -30,8 +30,7 @@ class MetadataFromText(Metainfo):
     total_available_square_feet_for_rent: Optional[float] = Field(None, description="Total available square feet (NRA/GBA) for rent")
     total_parcel_size: Optional[float] = Field(None, description="Total parcel size including building and land / parking in inches. If in acres, convert to square feet.")
     
-    number_of_units: Optional[int] = Field(None, description="Number of units, lots, or apartments")
-    number_of_buildings: Optional[int] = Field(None, description="Number of separate buildings in the property/portfolio")
+    number_of_units: Optional[int] = Field(None, description="Number of tenants, units, or apartments. Same than rent roll size.")
     
     cap_rate: Optional[FinancialLineItem] = Field(None, description="Cap rate as a percentage (ex: 6.25%)")
     total_net_operating_income: Optional[FinancialLineItem] = Field(None, description="Total net operating income in USD.")
@@ -41,7 +40,7 @@ class MetadataFromText(Metainfo):
 # ==========================================
 
 class RentRollRow(BaseModel):
-    """Represents a single line item/tenant in a CRE Rent Roll."""
+    """Each line Represents a single item/tenant in a CRE Rent Roll or OM document."""
     
     tenant_name: Optional[str] = Field(None, description="Tenant corporate name (ex: Starbucks, Vacant, Corporate Lease)")
     tenant_headquarters: Optional[str] = Field(None, description="Tenant headquarters address or city name")
@@ -64,7 +63,7 @@ class RentRollRow(BaseModel):
 
 class RentRollTableExtraction(Metainfo):
     """The complete wrapper for parsing entire Rent Roll tables."""
-    rows: List[RentRollRow] = Field(default=[], description="List of all tenants extracted from the rent roll")
+    rows: List[RentRollRow] = Field(default=[], description="List of all tenants extracted from the rent roll. If no rent roll, check if possible to recreate based on multiple pages in the OM document.")
 
 # ==========================================
 # 3. FINANCIAL STATEMENTS (COMBINED & DUAL-COLUMN)
@@ -138,9 +137,6 @@ class DemographicColumn(BaseModel):
     percentage_asian: Optional[float] = Field(None, description="Percentage of asian population in the area.")
     percentage_other: Optional[float] = Field(None, description="Percentage of other population in the area.")
 
-    percentage_male: Optional[float] = Field(None, description="Percentage of male population in the area.")
-    percentage_female: Optional[float] = Field(None, description="Percentage of female population in the area.")
-
     vehicles_per_day: Optional[int] = Field(None, description="Average number of vehicles per day in the area.")
 
 class MarketDemographicsReport(Metainfo):
@@ -162,7 +158,7 @@ class MarketDemographicsReport(Metainfo):
 # ==========================================
 class AuctionInformation(Metainfo):
     """Information about the auction."""
-    
+
     auction_date_start: Optional[str] = Field(None, description="Date of the auction start.")
     auction_date_end: Optional[str] = Field(None, description="Date of the auction end.")
     auction_location: Optional[str] = Field(None, description="Location of the auction.")
