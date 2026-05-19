@@ -1,5 +1,5 @@
-import os 
-os.chdir("C:\\Users\\alarr\\Documents\\repos\\ordaly\\api\\app")
+# import os 
+# os.chdir("C:\\Users\\alarr\\Documents\\repos\\ordaly\\api\\app")
 
 from __future__ import annotations
 
@@ -7,9 +7,11 @@ import logging
 import re
 from pathlib import Path
 from typing import Any, Optional
+
 import pymupdf
 from omegaconf import DictConfig
 
+from src.celery.tasks.pdf_parse_llm_graph import run_pdf_parse_llm_graph
 from src.celery.utils import utils_camelot, utils_vision
 from src.celery.utils.post_process_llm_values import post_process_llm_values
 from src.constants import parse_pipeline as PP
@@ -60,27 +62,10 @@ class PdfParseOrchestrator:
             return False
         return True
 
-    # --- Public API ------------------------------------------------------
-    def run(self, path: Path) -> dict[str, Any]:
-        path = path.resolve()
-        if not path.is_file():
-            return {
-                "status": "error",
-                "parser": "orchestrator_v1",
-                "document_filename": path.name,
-                "detail": "file not found",
-                "mock_extractions": {},
-            }
-
-        tier = "text_only"
-        camelot_tables: list[dict[str, Any]] = []
-        text_llm_by_schema: Optional[dict[str, Any]] = None
-        vision_results: list[dict[str, Any]] = []
+    def image_handler(self, native: bool, camelot_tables: list[dict[str, Any]], page_texts: list[str], path: Path) -> list[dict[str, Any]]: 
         errors: list[str] = []
-
-        full_text, page_texts, stats = self.extract_text_stats(path)
-        native = self.is_likely_native_pdf(full_text, stats)
-        camelot_tables = utils_camelot.run_camelot_financial_pass(path, page_texts)
+        vision_results: list[dict[str, Any]] = []
+        tier: str = "text_only"
 
         if native:
             coherent = utils_camelot.tables_look_coherent(camelot_tables)
@@ -111,19 +96,41 @@ class PdfParseOrchestrator:
                 errors.append("vision_failed_or_no_pdf2image")
             camelot_tables = [result["vision"] for result in vision_results]
 
-        text_llm_by_schema = self._llm.extract_metadata_from_pdf_text(
-            full_text, camelot_tables
-        )
+        return tier, camelot_tables
 
+
+    # --- Public API ------------------------------------------------------
+    def run(self, path: Path) -> dict[str, Any]:
+
+        path = path.resolve()
+        if not path.is_file():
+            return {
+                "status": "error",
+                "parser": "orchestrator_v1",
+                "document_filename": path.name,
+                "detail": "file not found",
+                "mock_extractions": {},
+            }
+
+        tier = "text_only"
+        camelot_tables: list[dict[str, Any]] = []
+        text_llm_by_schema: Optional[dict[str, Any]] = None
+        vision_results: list[dict[str, Any]] = []
+        errors: list[str] = []
+
+        # extract full text from pdf 
+        full_text, page_texts, stats = self.extract_text_stats(path)
+        native = self.is_likely_native_pdf(full_text, stats)
+        camelot_tables = utils_camelot.run_camelot_financial_pass(path, page_texts)
+
+        # if pages are pictures, will detect and scrap it 
+        tier, camelot_tables = self.image_handler(native, camelot_tables, page_texts, path)
+
+        # call the graph
+        text_llm_by_schema = run_pdf_parse_llm_graph(self._llm, page_texts, camelot_tables)
         text_llm_by_schema = post_process_llm_values(text_llm_by_schema)
 
-        if "type_of_sale" in text_llm_by_schema.get("metadata_from_text", {}):
-            type_of_sale = text_llm_by_schema.get("metadata_from_text").get("type_of_sale")
-            if type_of_sale in ["auction", "auctions", "auction sale"]:
-                _, text_llm_by_schema["auction_information"] = self._llm.run_one_sync(
-                    "auction_information", full_text, camelot_tables
-                )
-
+        # save to excel 
         excel_export_path = save_parse_excel_export(
             text_llm_by_schema=text_llm_by_schema,
             source_pdf_path=path,
@@ -146,10 +153,41 @@ class PdfParseOrchestrator:
         }
 
 
-if __name__ == "__main__":  # pragma: no cover
-    path = Path("test2.pdf")
-    from src.context import config, context
+# if __name__ == "__main__":  # pragma: no cover
+#     from src.context import config, context
+#     from tqdm import tqdm
 
-    self = PdfParseOrchestrator(context, config)
-    self._llm = PdfParseGptBridge(context, config)
-    self._llm.api_key = "AIzaSyDkltMEkFNuJvjw6WxnkIA_jxKq4nhyktI"
+#     self =PdfParseOrchestrator(context, config)
+#     self._llm.api_key = "AIzaSyCD0q1cBDdo_VY80IAUic4pefvjX2-IRsQ"
+#     root = Path(r"C:\Users\alarr\Downloads")
+
+#     results = {}
+
+#     # run tests
+#     paths = ["1e5f7a67-1067-4aa3-bd09-548f4977ea63.pdf",
+#     "Hampton Inn Adel - Offering Memorandum.pdf",
+#     "The Plaza - OM - Final 05 2026.pdf",
+#     "67df0dbc-f538-4c86-a037-7ec1247c4df1.pdf",
+#     "36644faf-99df-46b4-9d02-52aef897003c.pdf",
+#     "2ac721ba-773b-450c-86f1-69329f4bddba.pdf",
+#     "ff4518f0-4f7c-4f31-b9b2-7ae72a7a0223.pdf",
+#     "ea4de6a5-870d-4955-874a-6bab83e29e7f.pdf",
+#     "Dark Savers - Antioch, CA - OM (1).pdf",
+#     "CBRE Hotels Offering Memorandum - HI Selinsgrove - April 2026.pdf"]
+
+#     for path in tqdm(paths): 
+#         path = root / Path(path)
+#         full_text, page_texts, stats = self.extract_text_stats(path)
+#         native = self.is_likely_native_pdf(full_text, stats)
+#         camelot_tables = utils_camelot.run_camelot_financial_pass(path, page_texts)
+
+#         text_llm_by_schema = run_pdf_parse_llm_graph(self._llm, page_texts, camelot_tables)
+#         # text_llm_by_schema = post_process_llm_values(text_llm_by_schema)
+
+#         # save to excel 
+#         excel_export_path = save_parse_excel_export(
+#             text_llm_by_schema=text_llm_by_schema,
+#             source_pdf_path=path,
+#         )
+
+#         results[path.name] = text_llm_by_schema
