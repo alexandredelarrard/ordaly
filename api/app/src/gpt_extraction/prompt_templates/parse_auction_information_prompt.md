@@ -2,13 +2,11 @@
 
 {_format}
 
-
 ## Document text
 
 {query}
 
-## Result 
+## Result
 
 Return only valid JSON matching the schema.
 The JSON output is:
-

@@ -1,9 +1,13 @@
 """
-Build a styled multi-sheet XLSX from ``text_llm_by_schema`` LLM extraction payload.
+Build a styled multi-sheet XLSX from ``text_llm_by_schema`` (LLM extraction payload).
+
+Sheets (see ``EXCEL_WORKBOOK_SHEETS``): ``summary``, ``offer_pictures``, ``rent_roll``,
+``financial_statement``, ``building_report``, ``demographics_report``.
 """
 
 from __future__ import annotations
 
+import io
 import logging
 import re
 from datetime import date, datetime
@@ -11,9 +15,17 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Optional
 
+from openpyxl import Workbook
+from openpyxl.drawing.image import Image as XLImage
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter
+
+from src.utils.pdf_mupdf import open_pdf as _open_pdf_sanitized
+
 from src.constants.variables import (
     EXCEL_COLUMN_ID_KEYS,
     EXCEL_FIELD_LABELS,
+    EXCEL_SHEET_PAGE_OF_INTEREST_FIELDS,
     EXCEL_WORKBOOK_SHEETS,
     FINANCIAL_EXPENSE_ROWS,
     FINANCIAL_REVENUE_ROWS,
@@ -24,42 +36,35 @@ from src.constants.variables import (
 
 logger = logging.getLogger(__name__)
 
-try:
-    from openpyxl import Workbook
-    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
-    from openpyxl.utils import get_column_letter
-except ImportError:  # pragma: no cover
-    Workbook = None  # type: ignore[misc, assignment]
-
 # Theme
 _ACCENT = "0D3B66"
 _WHITE = PatternFill("solid", fgColor="FFFFFF")
 _HEADER_FILL = PatternFill("solid", fgColor=_ACCENT)
 _PROVENANCE_FILL = PatternFill("solid", fgColor="F7F9FC")
 _SECTION_FILL = PatternFill("solid", fgColor="E8EEF4")
-_TABLE_HEADER_FILL = PatternFill("solid", fgColor="D6E4F0")
 _REVENUE_FILL = PatternFill("solid", fgColor="E8F5E9")
 _EXPENSE_FILL = PatternFill("solid", fgColor="FFF8E1")
 _TOTAL_FILL = PatternFill("solid", fgColor="E3F2FD")
 _DATA_ZEBRA = PatternFill("solid", fgColor="FAFBFC")
-_RENT_DESC_FILL = PatternFill("solid", fgColor="E8F4FC")
-_RENT_FIN_FILL = PatternFill("solid", fgColor="E8F5E9")
-_RENT_LEASE_TENANT_FILL = PatternFill("solid", fgColor="F3E8FF")
 
-_RENT_ROLL_BLOCK_FILLS: dict[str, PatternFill] = {
-    "Unit description": _RENT_DESC_FILL,
-    "Unit financials": _RENT_FIN_FILL,
-    "Lease & tenant": _RENT_LEASE_TENANT_FILL,
-}
+_TITLE_FONT = Font(name="Calibri", size=18, bold=True, color=_ACCENT)
+_SUBTITLE_FONT = Font(name="Calibri", size=12, italic=True, color="5C6A7A")
+_KPI_STRIP_FILL = PatternFill("solid", fgColor="F0F4F8")
+_KPI_ACCENT_FILL = PatternFill("solid", fgColor="D4E4F4")
 
-_VACANT_FONT = Font(name="Calibri", size=10, color="C00000")
-_VACANT_FONT_BOLD = Font(name="Calibri", size=10, bold=True, color="C00000")
+_VACANT_FONT = Font(name="Calibri", size=12, color="C00000")
+_VACANT_FONT_BOLD = Font(name="Calibri", size=12, bold=True, color="C00000")
 
-_HEADER_FONT = Font(name="Calibri", color="FFFFFF", bold=True, size=11)
-_SECTION_FONT = Font(name="Calibri", bold=True, size=11, color=_ACCENT)
-_BODY_FONT = Font(name="Calibri", size=10, color="1A1A1A")
-_BODY_BOLD = Font(name="Calibri", size=10, bold=True, color="1A1A1A")
-_TOTAL_FONT = Font(name="Calibri", size=10, bold=True, color=_ACCENT)
+_HEADER_FONT = Font(name="Calibri", color="FFFFFF", bold=True, size=12)
+_SECTION_FONT = Font(name="Calibri", bold=True, size=12, color=_ACCENT)
+_BODY_FONT = Font(name="Calibri", size=12, color="1A1A1A")
+_BODY_BOLD = Font(name="Calibri", size=12, bold=True, color="1A1A1A")
+_TOTAL_FONT = Font(name="Calibri", size=12, bold=True, color=_ACCENT)
+
+# LLM extraction confidence (0-10); green high, red low, black mid band.
+_CONF_SCORE_GREEN = "008000"
+_CONF_SCORE_RED = "C00000"
+_CONF_SCORE_BLACK = "1A1A1A"
 _THIN = Side(style="thin", color="D0D7DE")
 _MEDIUM = Side(style="medium", color="9EB4C8")
 _BORDER = Border(left=_THIN, right=_THIN, top=_THIN, bottom=_THIN)
@@ -77,9 +82,11 @@ _FMT_NUMBER = "#,##0.##"
 
 _SHEET_WHITE_ROWS = 120
 _SHEET_WHITE_COLS = 20
+_PICTURE_MAX_WIDTH_PX = 720
+_PDF_RENDER_ZOOM = 2.0
 
 _METAINFO_KEY = "page_number"
-_YEAR_LABEL_KEYS = frozenset({"kpi_year", "revenue_year", "year"})
+_YEAR_LABEL_KEYS = frozenset({"kpi_year", "revenue_year", "year", "year_label", "financial_year"})
 _HOTEL_TOKENS = frozenset(
     ("hotel", "hospitality", "lodging", "resort", "motel", "inn", "hostel", "casino")
 )
@@ -89,11 +96,42 @@ _PERCENT_RE = re.compile(
     re.I,
 )
 _DATE_RE = re.compile(r"date", re.I)
+# Avoid matching ``rent`` inside ``rentable``; avoid ``population`` inside ``total_population``.
 _CURRENCY_RE = re.compile(
-    r"(price|rent|income|revenue|expense|fee|tax|noi|egi|gpr|adr|revpar|bid|reserve|"
-    r"population|household_income|operating|profit|ebitda|miscellaneous|departmental|"
+    r"(price|(?<![a-z])rent(?![a-z])|gross_potential|income|revenue|expense|fee|tax|noi|egi|gpr|adr|revpar|bid|reserve|"
+    r"household_income|operating|profit|ebitda|miscellaneous|departmental|"
     r"undistributed|replacement|utilities|insurance|electric|gas|trash|water)",
     re.I,
+)
+
+# Explicit kinds (overrides substring heuristics on field names).
+_FORCE_INTEGER_KEYS = frozenset(
+    {
+        "offer_rentable_square_feet",
+        "unit_size_sf",
+        "building_surface_sf",
+        "amenity_size",
+        "total_population",
+        "total_households",
+        "number_tenants_in_building",
+        "buildings_number",
+        "loading_dock_number",
+        "floors_count",
+        "parking_spaces",
+        "building_height",
+        "year_built",
+        "year_renovated",
+        "number_of_properties",
+        "rooms_count",
+        "beds_count",
+        "lease_remaining_years",
+    }
+)
+_FORCE_PERCENT_KEYS = frozenset(
+    {
+        "population_growth_projection",
+        "occupancy_percentage",
+    }
 )
 _DATE_PARSE_FORMATS = (
     "%Y-%m-%d",
@@ -190,6 +228,23 @@ def _filter_list_columns(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def _infer_cell_kind(field_key: str, value: Any) -> CellKind:
     if field_key in _YEAR_LABEL_KEYS:
         return CellKind.TEXT
+    if field_key in _FORCE_PERCENT_KEYS:
+        return CellKind.PERCENT
+    if field_key in _FORCE_INTEGER_KEYS:
+        if isinstance(value, bool):
+            return CellKind.TEXT
+        if isinstance(value, int):
+            return CellKind.INTEGER
+        if isinstance(value, float):
+            return CellKind.INTEGER if value == int(value) else CellKind.NUMBER
+        if isinstance(value, str):
+            n = _coerce_numeric(value)
+            if n is None:
+                return CellKind.TEXT
+            if isinstance(n, float) and n != int(n):
+                return CellKind.NUMBER
+            return CellKind.INTEGER
+        return CellKind.TEXT
     if _DATE_RE.search(field_key):
         return CellKind.DATE
     if _PERCENT_RE.search(field_key):
@@ -246,6 +301,25 @@ def _coerce_numeric(value: Any) -> float | int | None:
     return None
 
 
+# Negative Total / Other OpEx are omitted in the financial matrix (see ``_write_list_matrix``).
+_FINANCIAL_SUPPRESS_NEGATIVE_OPEX_KEYS = frozenset(
+    {"total_operating_expenses", "other_operating_expenses"}
+)
+
+
+def _all_numeric_values_negative_for_key(columns: list[dict[str, Any]], key: str) -> bool:
+    """True when at least one column has a number and every such number is < 0."""
+    found = False
+    for col in columns:
+        n = _coerce_numeric(col.get(key))
+        if n is None:
+            continue
+        found = True
+        if n >= 0:
+            return False
+    return found
+
+
 def _prepare_cell(field_key: str, value: Any) -> tuple[Any, CellKind]:
     if _is_blank(value):
         return "", CellKind.TEXT
@@ -260,8 +334,8 @@ def _prepare_cell(field_key: str, value: Any) -> tuple[Any, CellKind]:
         num = _coerce_numeric(value)
         if num is None:
             return value, CellKind.TEXT
-        # Values like 10.43 (percent points) vs 0.1043 (fraction).
-        if abs(num) > 1.5:
+        # Percent points (e.g. 6.5, 75) vs fraction (0.065); growth often 1.2–5.
+        if abs(num) > 1.5 or (field_key in _FORCE_PERCENT_KEYS and 1 < abs(num) <= 100):
             num = num / 100.0
         return num, CellKind.PERCENT
 
@@ -401,17 +475,390 @@ def _collect_page_numbers(*sections: Any) -> str:
     return ", ".join(parts)
 
 
-def _merge_flat_dicts(*dicts: dict[str, Any] | None) -> dict[str, Any]:
-    merged: dict[str, Any] = {}
-    for d in dicts:
-        if not isinstance(d, dict):
+def _page_extraction_dict(data: dict[str, Any]) -> dict[str, Any]:
+    raw = data.get("page_extraction")
+    return raw if isinstance(raw, dict) else {}
+
+
+def _normalize_page_numbers(raw: Any) -> list[int]:
+    """1-based PDF page indices from ``PageOfInterest`` list fields."""
+    if raw is None:
+        return []
+    items = raw if isinstance(raw, list) else [raw]
+    out: list[int] = []
+    seen: set[int] = set()
+    for item in items:
+        n = _coerce_numeric(item)
+        if n is None:
             continue
-        for k, v in d.items():
-            if k == _METAINFO_KEY:
-                continue
+        page = int(n)
+        if page < 1 or page in seen:
+            continue
+        seen.add(page)
+        out.append(page)
+    return sorted(out)
+
+
+def _format_page_list(pages: list[int]) -> str:
+    if not pages:
+        return ""
+    return ", ".join(str(p) for p in pages)
+
+
+def _page_list_for_poi_fields(data: dict[str, Any], fields: str | tuple[str, ...]) -> list[int]:
+    poi = _page_extraction_dict(data)
+    names = (fields,) if isinstance(fields, str) else fields
+    merged: list[int] = []
+    seen: set[int] = set()
+    for name in names:
+        for p in _normalize_page_numbers(poi.get(name)):
+            if p not in seen:
+                seen.add(p)
+                merged.append(p)
+    return sorted(merged)
+
+
+def _pages_for_sheet(data: dict[str, Any], sheet_name: str, *legacy_sections: Any) -> str:
+    """Pages (OM) from ``page_extraction``, merged with any legacy ``page_number`` on sections."""
+    parts: list[str] = []
+    seen: set[str] = set()
+
+    def _add_text(text: str) -> None:
+        t = text.strip()
+        if not t or t in seen:
+            return
+        seen.add(t)
+        parts.append(t)
+
+    poi_fields = EXCEL_SHEET_PAGE_OF_INTEREST_FIELDS.get(sheet_name)
+    if poi_fields:
+        _add_text(_format_page_list(_page_list_for_poi_fields(data, poi_fields)))
+
+    legacy = _collect_page_numbers(*legacy_sections)
+    if legacy:
+        for token in legacy.split(","):
+            _add_text(token.strip())
+
+    return ", ".join(parts)
+
+
+def _render_pdf_page_png(pdf_path: Path, page_num_1based: int) -> bytes | None:
+    """Rasterize one PDF page to PNG bytes (``page_num_1based`` is 1-based)."""
+    try:
+        import pymupdf
+    except ImportError:
+        logger.warning("pymupdf not installed — cannot render offer pictures.")
+        return None
+
+    try:
+        doc = _open_pdf_sanitized(pdf_path)
+        try:
+            idx = page_num_1based - 1
+            if idx < 0 or idx >= doc.page_count:
+                return None
+            page = doc[idx]
+            mat = pymupdf.Matrix(_PDF_RENDER_ZOOM, _PDF_RENDER_ZOOM)
+            pix = page.get_pixmap(matrix=mat, alpha=False)
+            return pix.tobytes("png")
+        finally:
+            doc.close()
+    except Exception as exc:
+        logger.warning("Failed to render PDF page %s from %s: %s", page_num_1based, pdf_path, exc)
+        return None
+
+
+def _scaled_xl_image(png_bytes: bytes) -> XLImage | None:
+    try:
+        from PIL import Image as PILImage
+    except ImportError:
+        logger.warning("Pillow not installed — cannot embed offer pictures.")
+        return None
+
+    pil = PILImage.open(io.BytesIO(png_bytes))
+    w, h = pil.size
+    if w <= 0 or h <= 0:
+        return None
+    scale = min(1.0, _PICTURE_MAX_WIDTH_PX / w)
+    disp_w = max(int(w * scale), 1)
+    disp_h = max(int(h * scale), 1)
+    buf = io.BytesIO()
+    resample = getattr(getattr(PILImage, "Resampling", PILImage), "LANCZOS", PILImage.LANCZOS)
+    pil.resize((disp_w, disp_h), resample).save(buf, format="PNG")
+    buf.seek(0)
+    img = XLImage(buf)
+    img.width = disp_w
+    img.height = disp_h
+    return img
+
+
+def _anchor_image_rows(image_height_px: int) -> int:
+    """Approximate Excel row span for a floating image."""
+    return max(int(image_height_px / 15) + 3, 6)
+
+
+# Keys stored on each ``Leases`` item (schema); repeated unit/rent fields come from ``RentRollRow``.
+_RENT_ROLL_LEASE_ITEM_KEYS: frozenset[str] = frozenset(
+    {
+        "lease_start_date",
+        "lease_end_date",
+        "lease_remaining_years",
+        "lease_structure_type",
+    }
+)
+
+
+def _iter_rent_roll_excel_rows(unit: dict[str, Any]) -> list[dict[str, Any]]:
+    """
+    Build one flat dict per **Excel row**: unit/rent/escalation fields repeat; each
+    ``Leases`` entry becomes its own row. Legacy single ``unit_leases`` dict is one row.
+
+    ``unit_leases`` absent or ``[]`` yields a single row (lease columns may be empty).
+    """
+    skip = frozenset({"unit_leases", _METAINFO_KEY})
+    base: dict[str, Any] = {k: v for k, v in unit.items() if k not in skip}
+    ul = unit.get("unit_leases")
+
+    def _row_from_lease(lease: dict[str, Any]) -> dict[str, Any]:
+        row = dict(base)
+        for lk in _RENT_ROLL_LEASE_ITEM_KEYS:
+            row.pop(lk, None)
+        for lk in _RENT_ROLL_LEASE_ITEM_KEYS:
+            v = lease.get(lk)
             if not _is_blank(v):
-                merged[k] = v
-    return merged
+                row[lk] = v
+        return row
+
+    if isinstance(ul, list):
+        lease_rows = [_row_from_lease(le) for le in ul if isinstance(le, dict)]
+        return lease_rows if lease_rows else [dict(base)]
+
+    if isinstance(ul, dict) and ul:
+        return [_row_from_lease(ul)]
+
+    return [dict(base)]
+
+
+def _rent_roll_building_sections(rr: dict[str, Any]) -> list[tuple[str | None, list[dict[str, Any]]]]:
+    """
+    ``RentRollReport.rows`` is either a list of ``RentRollReportPerBuilding`` dicts
+    (each with ``building_name`` + nested ``rows``), or a legacy flat list of units.
+    """
+    outer = rr.get("rows")
+    if not isinstance(outer, list) or not outer:
+        return []
+    first = outer[0]
+    if isinstance(first, dict) and isinstance(first.get("rows"), list):
+        sections: list[tuple[str | None, list[dict[str, Any]]]] = []
+        for b in outer:
+            if not isinstance(b, dict):
+                continue
+            name = b.get("building_name")
+            inner = b.get("rows") or []
+            units = [x for x in inner if isinstance(x, dict)]
+            label = str(name).strip() if not _is_blank(name) else None
+            sections.append((label, units))
+        return sections
+    label = str(rr.get("building_name") or "").strip() or None
+    return [
+        (
+            label,
+            [x for x in outer if isinstance(x, dict)],
+        )
+    ]
+
+
+def _first_financial_year_kpis(
+    data: dict[str, Any],
+) -> tuple[Any, CellKind, Any, CellKind, str | None]:
+    """Cap rate, NOI, and period label from the first row of ``financial_cycles``."""
+    fin_key = _pick_financial_key(data)
+    if not fin_key:
+        return "", CellKind.TEXT, "", CellKind.TEXT, None
+    section = data.get(fin_key)
+    if not isinstance(section, dict):
+        return "", CellKind.TEXT, "", CellKind.TEXT, None
+    cycles = section.get("financial_cycles")
+    if not isinstance(cycles, list) or not cycles:
+        return "", CellKind.TEXT, "", CellKind.TEXT, None
+    first = cycles[0]
+    if not isinstance(first, dict):
+        return "", CellKind.TEXT, "", CellKind.TEXT, None
+    year = first.get("financial_year") or first.get("year_label") or first.get("year")
+    year_s = str(year).strip() if not _is_blank(year) else None
+    cap_raw = first.get("cap_rate")
+    noi_raw = first.get("net_operating_income")
+    cap_disp, cap_kind = _prepare_cell("cap_rate", cap_raw)
+    noi_disp, noi_kind = _prepare_cell("net_operating_income", noi_raw)
+    return cap_disp, cap_kind, noi_disp, noi_kind, year_s
+
+
+def _metadata_scalar_block(meta: dict[str, Any]) -> dict[str, Any]:
+    """Top-level metadata fields excluding nested ``asset`` list."""
+    skip = frozenset({"asset", _METAINFO_KEY})
+    return {k: v for k, v in meta.items() if k not in skip and not _is_blank(v)}
+
+
+def _metadata_offer_rows(meta: dict[str, Any]) -> list[dict[str, Any]]:
+    raw = meta.get("asset")
+    if not isinstance(raw, list):
+        return []
+    return [x for x in raw if isinstance(x, dict)]
+
+
+def _write_hero_header(ws: Any, row: int, title: str, subtitle: str | None, last_col: int) -> int:
+    lc = max(last_col, 4)
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=lc)
+    cell = ws.cell(row=row, column=1, value=_excel_value(title))
+    cell.font = _TITLE_FONT
+    cell.fill = _WHITE
+    cell.alignment = Alignment(wrapText=True, vertical="center", horizontal="left")
+    cell.border = Border(bottom=_MEDIUM)
+    r = row + 1
+    if subtitle and subtitle.strip():
+        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=lc)
+        sub = ws.cell(row=r, column=1, value=_excel_value(subtitle))
+        sub.font = _SUBTITLE_FONT
+        sub.fill = _WHITE
+        sub.alignment = _WRAP
+        sub.border = _BORDER
+        r += 1
+    return r + 1
+
+
+def _write_financial_kpi_strip(
+    ws: Any,
+    start_row: int,
+    *,
+    year_label: str | None,
+    cap_val: Any,
+    cap_kind: CellKind,
+    noi_val: Any,
+    noi_kind: CellKind,
+) -> int:
+    """Two-column KPI layout: cap rate and NOI from the first financial year."""
+    r = start_row
+    suffix = f" — {year_label}" if year_label else ""
+    ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=6)
+    banner = ws.cell(row=r, column=1, value=_excel_value(f"Key financial indicators{suffix}"))
+    banner.font = _SECTION_FONT
+    banner.fill = _KPI_STRIP_FILL
+    banner.alignment = _LEFT
+    banner.border = _BORDER
+    r += 1
+
+    has_cap = not _is_blank(cap_val) and cap_val != ""
+    has_noi = not _is_blank(noi_val) and noi_val != ""
+
+    if not has_cap and not has_noi:
+        ws.cell(row=r, column=1, value="No cap rate or NOI on the first financial period.").font = _BODY_FONT
+        ws.cell(row=r, column=1).fill = _WHITE
+        return r + 2
+
+    # Row: [Cap label][Cap value][spacer][NOI label][NOI value]
+    label_cap = ws.cell(row=r, column=1, value="Cap rate")
+    label_cap.font = _BODY_BOLD
+    label_cap.fill = _KPI_ACCENT_FILL
+    label_cap.border = _BORDER
+    label_cap.alignment = _LEFT
+    v_cap = ws.cell(row=r, column=2, value=_excel_value(cap_val) if has_cap else "—")
+    _apply_cell_style(v_cap, kind=cap_kind if has_cap else CellKind.TEXT, row_fill=_WHITE, bold_value=True)
+
+    label_noi = ws.cell(row=r, column=4, value="NOI")
+    label_noi.font = _BODY_BOLD
+    label_noi.fill = _KPI_ACCENT_FILL
+    label_noi.border = _BORDER
+    label_noi.alignment = _LEFT
+    v_noi = ws.cell(row=r, column=5, value=_excel_value(noi_val) if has_noi else "—")
+    _apply_cell_style(v_noi, kind=noi_kind if has_noi else CellKind.TEXT, row_fill=_WHITE, bold_value=True)
+    ws.cell(row=r, column=3, value="").fill = _WHITE
+    ws.cell(row=r, column=6, value="").fill = _WHITE
+    return r + 2
+
+
+def _offer_line_column_titles(columns: list[dict[str, Any]], data: dict[str, Any]) -> list[str]:
+    """Column headers for the summary offer matrix: prefer ``building_name`` from OM data."""
+    n = len(columns)
+    titles: list[str | None] = [None] * n
+
+    for i in range(n):
+        col = columns[i]
+        if isinstance(col, dict):
+            bn = col.get("building_name")
+            if not _is_blank(bn):
+                titles[i] = str(bn).strip()
+
+    br = data.get("building_report")
+    assets = br.get("assets") if isinstance(br, dict) else None
+    if isinstance(assets, list):
+        for i in range(min(n, len(assets))):
+            if isinstance(assets[i], dict):
+                bn = assets[i].get("building_name")
+                if not _is_blank(bn):
+                    titles[i] = str(bn).strip()
+
+    rr = data.get("rent_roll_report")
+    rr_rows = rr.get("rows") if isinstance(rr, dict) and isinstance(rr.get("rows"), list) else []
+    rr_names: list[str] = []
+    for sec in rr_rows:
+        if isinstance(sec, dict) and isinstance(sec.get("rows"), list):
+            bn = sec.get("building_name")
+            if not _is_blank(bn):
+                rr_names.append(str(bn).strip())
+    for i in range(n):
+        if titles[i] is None and i < len(rr_names):
+            titles[i] = rr_names[i]
+
+    out: list[str] = []
+    for i in range(n):
+        label = titles[i] if titles[i] else f"Offer {i + 1}"
+        out.append(_excel_value(str(label))[:40])
+    return out
+
+
+def _write_offer_lines_matrix(
+    ws: Any,
+    start_row: int,
+    offers: list[dict[str, Any]],
+    *,
+    data: dict[str, Any] | None = None,
+) -> int:
+    """One column per priced offer / building bucket from metadata."""
+    if not offers:
+        return start_row
+    columns = _filter_list_columns(offers)
+    if not columns:
+        return start_row
+    order = tuple(EXCEL_FIELD_LABELS.get("offer_line", {}).keys())
+    row_keys = _row_keys_for_allowed(columns, order)
+    if not row_keys:
+        row_keys = _ordered_row_keys(columns, "offer_line", custom_order=order or None)
+    if not row_keys:
+        return start_row
+    last_col = 1 + len(columns)
+    hdr_row = _write_section_banner(ws, start_row, "Offer line items", max(last_col, 2))
+    _style_table_header(ws, hdr_row, 1, last_col)
+    ws.cell(row=hdr_row, column=1, value="Metric")
+    col_titles = _offer_line_column_titles(columns, data or {})
+    if len(col_titles) != len(columns):
+        col_titles = [f"Offer {j + 1}" for j in range(len(columns))]
+    for j, title in enumerate(col_titles):
+        hdr = ws.cell(row=hdr_row, column=j + 2, value=title)
+        hdr.font = _HEADER_FONT
+        hdr.fill = _HEADER_FILL
+        hdr.border = _BORDER
+        hdr.alignment = _CENTER
+    r = hdr_row + 1
+    for idx, key in enumerate(row_keys):
+        row_fill = _DATA_ZEBRA if idx % 2 else _WHITE
+        lbl = ws.cell(row=r, column=1, value=_excel_value(_row_label("offer_line", key)))
+        _apply_cell_style(lbl, kind=CellKind.TEXT, row_fill=row_fill, bold_label=True)
+        for j, col_data in enumerate(columns):
+            raw = col_data.get(key)
+            display, kind = _prepare_cell(key, raw)
+            cell = ws.cell(row=r, column=j + 2, value=_excel_value(display))
+            _apply_cell_style(cell, kind=kind, row_fill=row_fill)
+        r += 1
+    return r + 1
 
 
 def _is_hotel_asset(data: dict[str, Any]) -> bool:
@@ -457,6 +904,7 @@ def _financial_is_total(fin_key: str, row_key: str) -> bool:
 
 def _init_sheet_canvas(ws: Any) -> None:
     ws.sheet_view.showGridLines = False
+    ws.freeze_panes = None
     for r in range(1, _SHEET_WHITE_ROWS + 1):
         for c in range(1, _SHEET_WHITE_COLS + 1):
             cell = ws.cell(row=r, column=c)
@@ -484,7 +932,37 @@ def _style_table_header(ws: Any, row: int, col_start: int, col_end: int) -> None
         cell.alignment = _CENTER
 
 
-def _write_page_block(ws: Any, row: int, pages: str) -> int:
+def _parse_confidence_answer(section: dict[str, Any] | None) -> int | None:
+    """Return clamped 0-10 score from ``confidence_answer`` on a schema dict, or None."""
+    if not isinstance(section, dict):
+        return None
+    raw = section.get("confidence_answer")
+    if raw is None or raw == "":
+        return None
+    try:
+        n = int(float(raw))
+    except (TypeError, ValueError):
+        return None
+    return max(0, min(10, n))
+
+
+def _confidence_score_value_font(score: int | None) -> Font:
+    if score is None:
+        return _BODY_FONT
+    if score >= 7:
+        return Font(name="Calibri", size=12, bold=True, color=_CONF_SCORE_GREEN)
+    if score <= 4:
+        return Font(name="Calibri", size=12, bold=True, color=_CONF_SCORE_RED)
+    return Font(name="Calibri", size=12, bold=True, color=_CONF_SCORE_BLACK)
+
+
+def _write_page_block(
+    ws: Any,
+    row: int,
+    pages: str,
+    *,
+    confidence_section: dict[str, Any] | None = None,
+) -> int:
     ws.cell(row=row, column=1, value="Pages (OM)").font = _BODY_BOLD
     ws.cell(row=row, column=1).fill = _PROVENANCE_FILL
     ws.cell(row=row, column=1).border = _BORDER
@@ -493,7 +971,18 @@ def _write_page_block(ws: Any, row: int, pages: str) -> int:
     val_cell.fill = _PROVENANCE_FILL
     val_cell.border = _BORDER
     val_cell.alignment = _WRAP
-    return row + 2
+
+    score = _parse_confidence_answer(confidence_section)
+    r2 = row + 1
+    ws.cell(row=r2, column=1, value="Confidence (0-10)").font = _BODY_BOLD
+    ws.cell(row=r2, column=1).fill = _PROVENANCE_FILL
+    ws.cell(row=r2, column=1).border = _BORDER
+    conf_val = ws.cell(row=r2, column=2, value="—" if score is None else score)
+    conf_val.font = _confidence_score_value_font(score)
+    conf_val.fill = _PROVENANCE_FILL
+    conf_val.border = _BORDER
+    conf_val.alignment = _WRAP
+    return row + 3
 
 
 def _write_section_banner(ws: Any, row: int, title: str, last_col: int) -> int:
@@ -535,7 +1024,7 @@ def _column_header(item: dict[str, Any], index: int, label_section: str) -> str:
     """Build column title from schema id fields (year, unit name, area, etc.)."""
     if label_section == "rent_roll_report":
         parts: list[str] = []
-        unit = item.get("unit_name")
+        unit = item.get("unit_id") or item.get("unit_name")
         tenant = item.get("tenant_name")
         if not _is_blank(unit):
             parts.append(_excel_value(str(unit)).strip())
@@ -550,10 +1039,14 @@ def _column_header(item: dict[str, Any], index: int, label_section: str) -> str:
             return _excel_value(str(val).strip()[:40])
 
     for key in (
+        "financial_year",
         "kpi_year",
         "revenue_year",
         "year",
-        "area_type",
+        "year_label",
+        "radius_scope",
+        "radius_label",
+        "unit_id",
         "unit_name",
         "tenant_name",
         "name",
@@ -573,10 +1066,6 @@ def _row_keys_for_allowed(
         if any(not _is_blank(col.get(k)) for col in columns):
             keys.append(k)
     return keys
-
-
-def _block_has_data(columns: list[dict[str, Any]], allowed_keys: tuple[str, ...]) -> bool:
-    return bool(_row_keys_for_allowed(columns, allowed_keys))
 
 
 def _write_list_matrix(
@@ -605,6 +1094,18 @@ def _write_list_matrix(
         row_keys = _ordered_row_keys(columns, label_section, custom_order=custom_order)
     if not row_keys:
         return start_row
+
+    if label_section in ("financial_statement", "financial_statement_hotel"):
+        row_keys = [
+            k
+            for k in row_keys
+            if not (
+                k in _FINANCIAL_SUPPRESS_NEGATIVE_OPEX_KEYS
+                and _all_numeric_values_negative_for_key(columns, k)
+            )
+        ]
+        if not row_keys:
+            return start_row
 
     last_col = 1 + len(columns)
     header_row = start_row
@@ -664,6 +1165,13 @@ def _write_list_matrix(
         for j, col_data in enumerate(columns):
             is_vacant = bool(vacant_columns[j]) if vacant_columns else False
             raw = col_data.get(key)
+            if (
+                label_section in ("financial_statement", "financial_statement_hotel")
+                and key in _FINANCIAL_SUPPRESS_NEGATIVE_OPEX_KEYS
+            ):
+                nv = _coerce_numeric(raw)
+                if nv is not None and nv < 0:
+                    raw = None
             display, kind = _prepare_cell(key, raw)
             cell = ws.cell(row=r, column=j + 2, value=_excel_value(display))
             _apply_cell_style(
@@ -676,7 +1184,6 @@ def _write_list_matrix(
             )
         r += 1
 
-    ws.freeze_panes = ws.cell(row=data_start, column=2)
     return r + 1
 
 
@@ -698,45 +1205,99 @@ def _write_financial_matrix(
     )
 
 
-def _write_rent_roll_blocks(
+def _rent_roll_merged_field_order() -> tuple[str, ...]:
+    """Single column order: unit / rent / lease blocks concatenated (dedupe)."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for _title, keys in RENT_ROLL_BLOCKS:
+        for k in keys:
+            if k not in seen:
+                seen.add(k)
+                out.append(k)
+    return tuple(out)
+
+
+def _rent_roll_table_title(building_name: str | None, building_index: int) -> str:
+    if not _is_blank(building_name):
+        return str(building_name).strip()
+    return f"Building {building_index + 1}"
+
+
+def _write_rent_roll_transposed_table(
     ws: Any,
     start_row: int,
-    rows: list[Any],
+    units: list[Any],
+    *,
+    building_name: str | None = None,
+    building_index: int = 0,
 ) -> int:
-    """Rent roll: description, financials, lease & tenant blocks."""
-    label_section = "rent_roll_report"
-    columns = _filter_list_columns([x for x in rows if isinstance(x, dict)])
-    if not columns:
-        return start_row
-
-    vacant_columns = [_unit_is_vacant(c) for c in columns]
-    last_col = max(1 + len(columns), 2)
-    r = start_row
-    wrote_any = False
-
-    for block_title, field_keys in RENT_ROLL_BLOCKS:
-        if not _block_has_data(columns, field_keys):
+    """One table per building: title row, header row, then one row per lease (unit fields repeated)."""
+    expanded: list[tuple[dict[str, Any], int]] = []
+    for unit_idx, raw in enumerate(units):
+        if not isinstance(raw, dict):
             continue
-        if wrote_any:
-            r += 1  # white spacer between blocks
-        wrote_any = True
+        for row in _iter_rent_roll_excel_rows(raw):
+            if row and not _dict_all_values_blank(row):
+                expanded.append((row, unit_idx))
 
-        r = _write_section_banner(ws, r, block_title, last_col)
-        block_fill = _RENT_ROLL_BLOCK_FILLS.get(block_title, _DATA_ZEBRA)
-        r = _write_list_matrix(
-            ws,
-            r,
-            rows,
-            label_section=label_section,
-            allowed_keys=field_keys,
-            default_row_fill=block_fill,
-            columns=columns,
-            vacant_columns=vacant_columns,
-        )
+    flat = [r for r, _ in expanded]
+    stripe_by_unit = [s for _, s in expanded]
 
-    if wrote_any:
-        ws.freeze_panes = ws.cell(row=start_row + 1, column=2)
-    return r
+    base_order = _rent_roll_merged_field_order()
+    present_keys = (
+        [k for k in base_order if any(not _is_blank(u.get(k)) for u in flat)]
+        if flat
+        else list(base_order)
+    )
+    if not present_keys:
+        present_keys = ["unit_id", "tenant_name"]
+
+    title = _rent_roll_table_title(building_name, building_index)
+    last_col = max(1 + len(present_keys), 2)
+
+    r = start_row
+    ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=last_col)
+    title_cell = ws.cell(row=r, column=1, value=_excel_value(title))
+    title_cell.font = _SECTION_FONT
+    title_cell.fill = _SECTION_FILL
+    title_cell.alignment = _LEFT
+    title_cell.border = _BORDER
+    r += 1
+
+    hdr = r
+    _style_table_header(ws, hdr, 1, last_col)
+    ws.cell(row=hdr, column=1, value="#")
+    for j, key in enumerate(present_keys):
+        c = ws.cell(row=hdr, column=j + 2, value=_excel_value(_row_label("rent_roll_report", key)))
+        c.font = _HEADER_FONT
+        c.fill = _HEADER_FILL
+        c.border = _BORDER
+        c.alignment = _CENTER
+
+    r = hdr + 1
+    if not flat:
+        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=last_col)
+        empty = ws.cell(row=r, column=1, value="No unit rows extracted for this building.")
+        empty.font = _BODY_FONT
+        empty.fill = _WHITE
+        empty.border = _BORDER
+        empty.alignment = _WRAP
+        return r + 2
+
+    for i, unit in enumerate(flat):
+        vacant = _unit_is_vacant(unit)
+        stripe = stripe_by_unit[i]
+        row_fill = _DATA_ZEBRA if stripe % 2 else _WHITE
+        idx_cell = ws.cell(row=r, column=1, value=i + 1)
+        _apply_cell_style(idx_cell, kind=CellKind.INTEGER, row_fill=row_fill, bold_value=False, vacant=vacant)
+        for j, key in enumerate(present_keys):
+            cell_raw = unit.get(key)
+            display, kind = _prepare_cell(key, cell_raw)
+            cell = ws.cell(row=r, column=j + 2, value=_excel_value(display))
+            _apply_cell_style(cell, kind=kind, row_fill=row_fill, vacant=vacant)
+        r += 1
+
+    return r + 1
 
 
 # ---------------------------------------------------------------------------
@@ -747,22 +1308,47 @@ def _write_rent_roll_blocks(
 def _build_summary_sheet(ws: Any, data: dict[str, Any]) -> bool:
     _init_sheet_canvas(ws)
     meta = data.get("metadata_from_text") if isinstance(data.get("metadata_from_text"), dict) else {}
-    kpis = data.get("meta_key_kpis") if isinstance(data.get("meta_key_kpis"), dict) else {}
-    meta_flat = {k: v for k, v in meta.items() if k != _METAINFO_KEY}
-    kpi_rows = kpis.get("cap_noi_per_year") if isinstance(kpis.get("cap_noi_per_year"), list) else []
+    scalars = _metadata_scalar_block(meta)
+    offers = _metadata_offer_rows(meta)
+    cap_d, cap_k, noi_d, noi_k, year_lbl = _first_financial_year_kpis(data)
 
-    if not _has_meaningful_value(meta_flat) and not _has_meaningful_value(kpi_rows):
+    has_profile = _has_meaningful_value(scalars) or _has_meaningful_value(offers)
+    fin_key = _pick_financial_key(data)
+    fin_section = data.get(fin_key) if fin_key else None
+    cycles = fin_section.get("financial_cycles") if isinstance(fin_section, dict) else None
+    has_first_year = isinstance(cycles, list) and bool(cycles)
+
+    if not has_profile and not has_first_year:
         return False
 
-    row = _write_page_block(ws, 1, _collect_page_numbers(meta, kpis))
-    if _has_meaningful_value(meta_flat):
-        row = _write_section_banner(ws, row, "Property summary", 2)
-        row = _write_single_column_table(ws, row, meta_flat, label_section="metadata_from_text")
-    if _has_meaningful_value(kpi_rows):
-        ncol = 1 + max(len(_filter_list_columns(kpi_rows)), 1)
-        row = _write_section_banner(ws, row, "Key financial KPIs", ncol)
-        row = _write_list_matrix(ws, row, kpi_rows, label_section="meta_key_kpis")
-    _autosize_columns(ws, max(ws.max_column, 2))
+    offer_name = str(meta.get("offer_name") or "").strip()
+    loc_bits = [str(meta.get(k) or "").strip() for k in ("city", "state") if not _is_blank(meta.get(k))]
+    subtitle = " — ".join(p for p in (offer_name, ", ".join(loc_bits)) if p) or None
+
+    row = 1
+    row = _write_hero_header(ws, row, "Overall offer description", subtitle, 6)
+    if has_first_year:
+        row = _write_financial_kpi_strip(
+            ws,
+            row,
+            year_label=year_lbl,
+            cap_val=cap_d,
+            cap_kind=cap_k,
+            noi_val=noi_d,
+            noi_kind=noi_k,
+        )
+    row = _write_page_block(
+        ws,
+        row,
+        _pages_for_sheet(data, "summary", meta),
+        confidence_section=meta,
+    )
+    if scalars:
+        row = _write_section_banner(ws, row, "Deal profile", 2)
+        row = _write_single_column_table(ws, row, scalars, label_section="metadata_from_text")
+    if offers:
+        row = _write_offer_lines_matrix(ws, row, offers, data=data)
+    _autosize_columns(ws, max(ws.max_column, 6))
     return True
 
 
@@ -774,13 +1360,20 @@ def _build_financial_sheet(ws: Any, data: dict[str, Any]) -> bool:
     section = data.get(fin_key)
     if not isinstance(section, dict):
         return False
-    years = section.get("historical_and_proforma_years")
+    years = section.get("financial_cycles")
     if not isinstance(years, list) or not _has_meaningful_value(years):
         return False
 
     ncol = 1 + len(_filter_list_columns(years))
-    row = _write_page_block(ws, 1, _collect_page_numbers(section))
-    row = _write_section_banner(ws, row, "Operating statement", max(ncol, 2))
+    row = 1
+    row = _write_hero_header(ws, row, "Financial statement", "Operating statement by period", max(ncol, 4))
+    row = _write_page_block(
+        ws,
+        row,
+        _pages_for_sheet(data, "financial_statement", section),
+        confidence_section=section,
+    )
+    row = _write_section_banner(ws, row, "Line items", max(ncol, 2))
     row = _write_financial_matrix(ws, row, years, fin_key=fin_key)
     _autosize_columns(ws, max(ws.max_column, 2))
     return True
@@ -791,90 +1384,153 @@ def _build_rent_roll_sheet(ws: Any, data: dict[str, Any]) -> bool:
     rr = data.get("rent_roll_report")
     if not isinstance(rr, dict):
         return False
-    rows = rr.get("rows")
-    if not isinstance(rows, list) or not _has_meaningful_value(rows):
+    sections = _rent_roll_building_sections(rr)
+    if not sections:
         return False
 
-    columns = _filter_list_columns(rows)
-    ncol = 1 + max(len(columns), 1)
-    row = _write_page_block(ws, 1, _collect_page_numbers(rr))
-    row = _write_section_banner(ws, row, "Rent roll", max(ncol, 2))
-    _write_rent_roll_blocks(ws, row, rows)
+    nkeys = len(_rent_roll_merged_field_order())
+    ncol = max(6, 1 + nkeys)
+
+    row = 1
+    row = _write_hero_header(ws, row, "Rent roll", "One table per building; one row per lease term when listed", max(ncol, 4))
+    row = _write_page_block(
+        ws,
+        row,
+        _pages_for_sheet(data, "rent_roll", rr),
+        confidence_section=rr,
+    )
+    for bidx, (bname, units) in enumerate(sections):
+        if bidx:
+            row += 2
+        row = _write_rent_roll_transposed_table(
+            ws,
+            row,
+            units,
+            building_name=bname,
+            building_index=bidx,
+        )
     _autosize_columns(ws, max(ws.max_column, 2))
     return True
 
 
-def _build_property_sheet(ws: Any, data: dict[str, Any]) -> bool:
+def _build_building_sheet(ws: Any, data: dict[str, Any]) -> bool:
     _init_sheet_canvas(ws)
-    building = data.get("building_report") if isinstance(data.get("building_report"), dict) else {}
-    hotel = data.get("hotel_specific_report") if isinstance(data.get("hotel_specific_report"), dict) else {}
-    amenities = data.get("amenities_report") if isinstance(data.get("amenities_report"), dict) else {}
-    property_flat = _merge_flat_dicts(building, hotel)
-    amen_list = amenities.get("amenities") if isinstance(amenities.get("amenities"), list) else []
-
-    if not _has_meaningful_value(property_flat) and not _has_meaningful_value(amen_list):
+    building_raw = data.get("building_report") if isinstance(data.get("building_report"), dict) else {}
+    raw_assets = building_raw.get("assets")
+    assets = [x for x in raw_assets if isinstance(x, dict)] if isinstance(raw_assets, list) else []
+    if not _has_meaningful_value(assets):
         return False
 
-    row = _write_page_block(ws, 1, _collect_page_numbers(building, hotel, amenities))
-    if _has_meaningful_value(property_flat):
-        row = _write_section_banner(ws, row, "Building & property", 2)
-        row = _write_single_column_table(ws, row, property_flat, label_section="building_report")
-    if _has_meaningful_value(amen_list):
-        ncol = 1 + len(_filter_list_columns([x for x in amen_list if isinstance(x, dict)]))
-        row = _write_section_banner(ws, row, "Amenities", max(ncol, 2))
-        _write_list_matrix(ws, row, amen_list, label_section="amenities_report")
+    ncol = 1 + max(len(_filter_list_columns(assets)), 1)
+    row = 1
+    row = _write_hero_header(ws, row, "Building report", "Physical asset and technical detail", max(ncol, 4))
+    row = _write_page_block(
+        ws,
+        row,
+        _pages_for_sheet(data, "building_report", building_raw),
+        confidence_section=building_raw,
+    )
+    row = _write_section_banner(ws, row, "Buildings", max(ncol, 2))
+    row = _write_list_matrix(ws, row, assets, label_section="building_report")
     _autosize_columns(ws, max(ws.max_column, 2))
     return True
 
 
-def _build_area_sheet(ws: Any, data: dict[str, Any]) -> bool:
+def _build_demographics_sheet(ws: Any, data: dict[str, Any]) -> bool:
     _init_sheet_canvas(ws)
     demo = data.get("demographics_report") if isinstance(data.get("demographics_report"), dict) else {}
-    attr = data.get("attractiveness_report") if isinstance(data.get("attractiveness_report"), dict) else {}
-    catchment = demo.get("catchment_areas") if isinstance(demo.get("catchment_areas"), list) else []
-    poi = attr.get("zone_attractiveness") if isinstance(attr.get("zone_attractiveness"), list) else []
-
-    if not _has_meaningful_value(catchment) and not _has_meaningful_value(poi):
+    cols = demo.get("area_statistics")
+    if not isinstance(cols, list) or not cols:
+        legacy = demo.get("catchment_areas")
+        cols = legacy if isinstance(legacy, list) else []
+    if not isinstance(cols, list) or not _has_meaningful_value(cols):
         return False
 
-    row = _write_page_block(ws, 1, _collect_page_numbers(demo, attr))
-    if _has_meaningful_value(catchment):
-        ncol = 1 + len(_filter_list_columns([x for x in catchment if isinstance(x, dict)]))
-        row = _write_section_banner(ws, row, "Demographics", max(ncol, 2))
-        row = _write_list_matrix(ws, row, catchment, label_section="demographics_report")
-    if _has_meaningful_value(poi):
-        ncol = 1 + len(_filter_list_columns([x for x in poi if isinstance(x, dict)]))
-        row = _write_section_banner(ws, row, "Points of interest", max(ncol, 2))
-        _write_list_matrix(ws, row, poi, label_section="attractiveness_report")
+    ncol = 1 + len(_filter_list_columns([x for x in cols if isinstance(x, dict)]))
+    row = 1
+    row = _write_hero_header(ws, row, "Demographics report", "Market depth, income, and composition", max(ncol, 4))
+    row = _write_page_block(
+        ws,
+        row,
+        _pages_for_sheet(data, "demographics_report", demo),
+        confidence_section=demo,
+    )
+    row = _write_section_banner(ws, row, "Catchment statistics", max(ncol, 2))
+    row = _write_list_matrix(ws, row, cols, label_section="demographics_report")
     _autosize_columns(ws, max(ws.max_column, 2))
     return True
 
 
-def _build_auction_sheet(ws: Any, data: dict[str, Any]) -> bool:
-    _init_sheet_canvas(ws)
-    auction = data.get("auction_information")
-    if not isinstance(auction, dict) or not _has_meaningful_value(auction):
+def _build_offer_pictures_sheet(
+    ws: Any,
+    data: dict[str, Any],
+    *,
+    source_pdf_path: Path | None = None,
+) -> bool:
+    """Embed PDF page screenshots for ``property_pictures_page`` (PageOfInterest)."""
+    pages = _page_list_for_poi_fields(data, "property_pictures_page")
+    if not pages:
+        return False
+    if source_pdf_path is None or not Path(source_pdf_path).is_file():
+        logger.warning("offer_pictures sheet skipped: PDF path missing or not found.")
         return False
 
-    row = _write_page_block(ws, 1, _collect_page_numbers(auction))
-    flat = {k: v for k, v in auction.items() if k != _METAINFO_KEY}
-    row = _write_section_banner(ws, row, "Auction details", 2)
-    _write_single_column_table(ws, row, flat, label_section="auction_information")
-    _autosize_columns(ws, 2)
+    pdf_path = Path(source_pdf_path).resolve()
+    _init_sheet_canvas(ws)
+    ws.column_dimensions["A"].width = 100
+
+    row = 1
+    row = _write_hero_header(ws, row, "Offer pictures", "Property photos from the offering memorandum", 4)
+    page_ex = data.get("page_extraction") if isinstance(data.get("page_extraction"), dict) else None
+    row = _write_page_block(
+        ws,
+        row,
+        _format_page_list(pages),
+        confidence_section=page_ex,
+    )
+
+    embedded = 0
+    for page_num in pages:
+        png = _render_pdf_page_png(pdf_path, page_num)
+        if not png:
+            continue
+        xl_img = _scaled_xl_image(png)
+        if xl_img is None:
+            continue
+
+        ws.cell(row=row, column=1, value=f"Page {page_num}").font = _SECTION_FONT
+        ws.cell(row=row, column=1).fill = _SECTION_FILL
+        ws.cell(row=row, column=1).border = _BORDER
+        row += 1
+
+        anchor = f"A{row}"
+        ws.add_image(xl_img, anchor)
+        row += _anchor_image_rows(int(xl_img.height))
+        embedded += 1
+        row += 1
+
+    if embedded == 0:
+        ws.cell(row=row, column=1, value="Could not render property picture pages from the PDF.").font = _BODY_FONT
+        return False
+
     return True
 
 
 _SHEET_BUILDERS = {
-    "Summary": _build_summary_sheet,
-    "Financial statement": _build_financial_sheet,
-    "Rent roll": _build_rent_roll_sheet,
-    "Property information": _build_property_sheet,
-    "Area attractiveness": _build_area_sheet,
-    "Auction": _build_auction_sheet,
+    "summary": _build_summary_sheet,
+    "offer_pictures": _build_offer_pictures_sheet,
+    "rent_roll": _build_rent_roll_sheet,
+    "financial_statement": _build_financial_sheet,
+    "building_report": _build_building_sheet,
+    "demographics_report": _build_demographics_sheet,
 }
 
 
-def build_text_llm_workbook(text_llm_by_schema: Optional[dict[str, Any]]) -> Any:
+def build_text_llm_workbook(
+    text_llm_by_schema: Optional[dict[str, Any]],
+    *,
+    source_pdf_path: Path | None = None,
+) -> Any:
     if Workbook is None:
         raise ImportError("openpyxl is required — pip install openpyxl")
 
@@ -887,13 +1543,20 @@ def build_text_llm_workbook(text_llm_by_schema: Optional[dict[str, Any]]) -> Any
         if builder is None:
             continue
         ws = wb.create_sheet(title=sheet_name[:31])
-        if not builder(ws, data):
+        if sheet_name == "offer_pictures":
+            ok = builder(ws, data, source_pdf_path=source_pdf_path)
+        else:
+            ok = builder(ws, data)
+        if not ok:
             wb.remove(ws)
 
     if not wb.sheetnames:
-        ws = wb.create_sheet(title="Summary")
+        ws = wb.create_sheet(title="summary")
         _init_sheet_canvas(ws)
         ws.cell(row=1, column=1, value="No extraction data available.")
+
+    for sheet in wb.worksheets:
+        sheet.freeze_panes = None
 
     return wb
 
@@ -901,10 +1564,12 @@ def build_text_llm_workbook(text_llm_by_schema: Optional[dict[str, Any]]) -> Any
 def write_text_llm_excel(
     text_llm_by_schema: Optional[dict[str, Any]],
     output_path: Path,
+    *,
+    source_pdf_path: Path | None = None,
 ) -> Path:
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    wb = build_text_llm_workbook(text_llm_by_schema)
+    wb = build_text_llm_workbook(text_llm_by_schema, source_pdf_path=source_pdf_path)
     wb.save(str(path))
     return path.resolve()
 
@@ -916,7 +1581,7 @@ def save_parse_excel_export(
 ) -> Optional[Path]:
     try:
         out = source_pdf_path.resolve().parent / f"{source_pdf_path.stem}_extraction.xlsx"
-        return write_text_llm_excel(text_llm_by_schema, out)
+        return write_text_llm_excel(text_llm_by_schema, out, source_pdf_path=source_pdf_path)
     except ImportError:
         logger.warning("openpyxl not installed — skipping Excel export.")
         return None

@@ -2,9 +2,13 @@
 
 from typing import List, Optional
 from pydantic import BaseModel, Field
+from datetime import datetime 
 
-class Metainfo(BaseModel):
-    page_number: Optional[str] = Field(None, description="Page number where the information comes from in the OM. Can be a list of pages (ex: 1,3,5-7)")
+NOW = datetime.today().strftime("YYYY-MM-DD")
+
+class Confidence(BaseModel):
+    """gives confidence score regarding the pydantic schema filled to tell user need to double check or not."""
+    confidence_answer: int = Field(5, description="A score between 0 and 10, 10 being full confidence in all the answers, 0 being no confidence at all.")
 
 # ==========================================
 # 0. ORCHESTRATOR
@@ -12,234 +16,226 @@ class Metainfo(BaseModel):
 
 class PageOfInterest(BaseModel):
     """Tells from the pdf which page should be put in LLM context for feature extraction """
-    metadata_page: List[int] = Field(None, description="List of page numbers where summary / presentation of the property / offer is located.")
-    rent_roll_page: List[int] = Field(None, description="List of page numbers where the rent roll is located if it exists.")
-    financial_summary_page: List[int] = Field(None, description="List of page numbers where the financial summary is located, including expenses, revenues. All the key financials in detail. Give all the pages if multi year.")
+    metadata_page: List[int] = Field([], description="List of page numbers where executive summary, offer summary is located")
+    rent_roll_page: Optional[List[int]] = Field(None, description="List of page numbers where the rent roll is located if it exists.")
+    financial_summary_page: Optional[List[int]] = Field(None, description="List of page numbers where the financial summary is located, including expenses, revenues. All the key financials in detail. Give all the pages if multi year.")
     demographics_page: Optional[List[int]] = Field(None, description="List of page numbers where the demographics is located. Usually 1, 3, 5 miles statistics.")
     attractiveness_page: Optional[List[int]] = Field(None, description="List of page numbers where the close points of interest are described to tell how good is the property.")
     auction_page: Optional[List[int]] = Field(None, description="List of page numbers where the auction details is located, if this is an auction.")
     amenities_page: Optional[List[int]] = Field(None, description="List of page numbers where the property amenities are described (parking lot, space to be built, pool, spa, etc.).")
     building_report_page: Optional[List[int]] = Field(None, description="List of page numbers where the building detail is located, when built, condition, renovated, description, etc.")
-    hotel_specific_page: Optional[List[int]] = Field(None, description="List of page numbers where the hotel specific details are located, such as amenities, rooms, etc. (ex: number of rooms if hotel).")
-    meta_key_kpis_page: Optional[List[int]] = Field(None, description="List of page numbers where the key financials are located, such as cap rate, total net operating income, for this year or in pro format.")
-
+    hotel_specific_page: Optional[List[int]] = Field(None, description="List of page numbers where the hotel specific details are located, such as amenities, rooms, etc. (ex: number of rooms if hotel), if this is a hotel.")
+    property_pictures_page: Optional[List[int]] = Field(None, description="List of page numbers where pictures of the buildings are displayed.")
+    
 # ==========================================
 # 1. METADATA (FAST TIER)
 # ==========================================
-class MetadataFromText(Metainfo):
-    """Structured CRE-ish metadata from raw PDF text (fast tier — text-only LLM)."""
+
+class Offer(BaseModel):
+    """Details regarding each priced offer in the OM. An offer can have several buildings"""
+
+    # investment details 
+    asset_name: Optional[str] = Field(None, description="Name of the offer or the asset to be bought. If cannot find any, put the asset address.")
+    buildings_number: Optional[int] = Field(None, description="Number of buildings for the offer. One building can have several units.")
+    is_unpriced: bool = Field(False, description="True if the OM says 'Market' or 'Inquire for Pricing'")
+    asking_price: Optional[float] = Field(None, description="Give the building asked price in USD. Usually in Summary pages. None if Auction or no proposed price.")
+    occupancy_percentage: Optional[float] = Field(None, description="Building occupancy rate. If building has several units, this is the average building occupancy rate.")
+    offer_rentable_square_feet: Optional[float] = Field(None, description="Building rentable square feet for the offer. Also called GLA")
+    offer_parcel_size_acres: Optional[float] = Field(None, description="Offer parcel size including building and land / parking in acres. If in square feet, convert to acres.")
+
+class MetadataFromText(Confidence):
+    """Structured CRE-ish metadata from raw PDF text."""
     
-    property_name: Optional[str] = Field(None, description="Name of the property")
-    property_address: Optional[str] = Field(None, description="Address of the property: street, city, state, zip")
-    city: Optional[str] = Field(None, description="Extracted city for quick filtering")
+    offer_name: Optional[str] = Field(None, description="Name of the overall offer, pdf header or offer name given in the summary.")
+    is_portfolio: Optional[bool] = Field(False, description="True if the deal contains multiple separate offers.")
+    number_of_properties: int = Field(1, description="Total count of priced properties in this offer.")
+    city: Optional[str] = Field(None, description="City of the offer")
     state: Optional[str] = Field(None, description="Extracted 2-letter state code (ex: TX, NY)")
-    asset_type: Optional[str] = Field(None, description="Type of asset: office, retail, industrial, multifamily, hotel, vacant land.")
-    asking_price: Optional[float] = Field(None, description="Asking price in USD, or 'Market/Inquire' / 'Unpriced'")
-    lot_lease_type: Optional[str] = Field(None, description="Lot lease type: NNN, NN, Modified Gross, Gross, FSG")
-    type_of_sale: Optional[str] = Field(None, description="Type of sale: auction or private sale.")
-
-    total_rentable_square_feet: Optional[float] = Field(None, description="Total rentable square feet (NRA/GBA)")
-    total_available_square_feet_for_rent: Optional[float] = Field(None, description="Total available square feet (NRA/GBA) for rent")
-    total_parcel_size_acres: Optional[float] = Field(None, description="Total parcel size including building and land / parking in acres. If in square feet, convert to acres.")
+    asset_type: Optional[str] = Field(None, description="One of the following asset type: Office, Retail, Industrial, Multifamily, Hospitality, Land.")
+    transaction_type: str = Field(..., description="One of the 2 types of offer: Private Sale or Auction")
     
-    number_of_units: Optional[int] = Field(None, description="Number of tenants, units, or apartments. Same than rent roll size.")
+    asset: Optional[List[Offer]] = Field(..., description="List each offer detail in the OM.")
 
-class MetaKeyKPiPerYear(BaseModel):
-    """Key performance indicators for the OM."""
-    kpi_year: Optional[str] = Field(None, description="Year of the KPI.")
-    cap_rate: Optional[float] = Field(None, description="Cap rate as a percentage (ex: 6.25%)")
-    total_net_operating_income: Optional[float] = Field(None, description="Total net operating income in USD.")
 
-class MetaKeyKPis(Metainfo):
-    """
-    cap_rate and total_net_operating_income per year for the OM.
-    """
-    cap_noi_per_year: List[MetaKeyKPiPerYear] = Field(
-        default_factory=list,
-        description="List of yearly financial key information extracted from the document.",
-    )
+class Building(BaseModel):
+    """Technical and physical structural constraints for each single building of the OM."""
+
+    building_name : Optional[str] = Field(None, description="Name of the building, either the main tenant or the building address if no denomination.")
+    building_address: Optional[str] = Field(None, description="Address of the building: street, city, state, zip.")
+    number_tenants_in_building:  Optional[int] = Field(1, description="Total possible number of tenants in the building, including vacants. Give number of units if multi units. For hotel give None. A vacancy counts for 1.")
+    building_ownership_type:  Optional[str] = Field(None, description="Ownership type. Can be one amongst: Fee simple, Leased Fee, Leasehold or Retail Condo.")
+    apn:  Optional[str] = Field(None, description="APN reference of the building.")
+
+    year_built: Optional[int] = Field(None, description="Building year built.")
+    year_renovated: Optional[int] = Field(None, description="Building Year of last major renovation.")
+    construction_type: Optional[str] = Field(None, description="Main construction type: wood, masonry, steel, concrete, etc.")
+    roof_condition: Optional[str] = Field(None, description="Building roof condition notes or rating. Brief roof condition description if no rating.")
+    
+    building_height: Optional[int] = Field(None, description="Building height in feet.")
+    building_surface_sf: Optional[int] = Field(None, description="Building surface in square feet.")
+    floors_count: Optional[int] = Field(1, description="Number of floors or stories. Minimum is 1, even if not specified.")
+    parking_spaces: Optional[int] = Field(None, description="Number of parking spaces.")
+
+    hvac_system_condition: Optional[str] = Field(None, description="HVAC details: Age, central vs individual units. Also tell if this is tenant vs landlord responsibility")
+    zoning_urban: Optional[str] = Field(None, description="Official zoning code (ex: C-3, M-1, GR). Or type of zoning if no code. e.g: 'Retail zone' ")
+    flood_zone: Optional[str] = Field(None, description="Flood zone of the property: A, B, C, X, etc.")
+    deferred_maintenance: Optional[str] = Field(None, description="Any explicit mention of immediate repairs needed (Deferred Maintenance)")
+
+    loading_dock_number: Optional[int] = Field(0, description="Number of loading docks, important for industrial building.")
+
+class BuildingConditions(Confidence):
+    """Details regarding each building. An offer can have several buildings"""
+
+    assets: Optional[List[Building]] = Field(None, description="List of each building detailed in the OM.")
+
+############# sepcific metadata for each asset type #############
+class HotelSpecific(BaseModel):
+    brand_affiliation: Optional[str] = Field(None, description="Brand of the hotel, leasing the building,")
+    pip_requirement: Optional[str] = Field(None, description="Details on Property Improvement Plan requirements")
+    pip_estimated_cost: Optional[float] = Field(None, description="Estimated cost for mandatory PIP updates")
+    management_unencumbered: Optional[bool] = Field(None, description="True if the buyer can bring their own management")
+    
+    rooms_count: Optional[int] = Field(None, description="Number of rooms of the property.")
+    beds_count: Optional[int] = Field(None, description="Number of beds of the property.")
 
 # ==========================================
 # 2. RENT ROLL (DEEP VISION / TABLE TIER)
 # ==========================================
 
-class RentRollRow(BaseModel):
-    """Each line Represents a single item/tenant in a CRE Rent Roll or OM document."""
+class RentRollRow(BaseModel): 
+    """Represents a clean row item extracted out of multi-tenant leasing tables."""
     
-    unit_name: Optional[str] = Field(None, description="Name of the unit or ID of the unit. Ex: 101, 102, etc.")
-    unit_address: Optional[str] = Field(None, description="Address of the unit")
-    unit_size: Optional[int] = Field(None, description="Unit size in square feet (SF)")
-    unit_rent_price_monthly: Optional[float] = Field(None, description="Current year Monthly rent price in USD.")
-    unit_rent_price_yearly: Optional[float] = Field(None, description="Current year Yearly rent price in USD.")
-    rent_per_sf: Optional[float] = Field(None, description="Current year Yearly Rent per square foot ($/SF/Yr). Common in Retail/Office.")
+    unit_id: Optional[str] = Field(None, description="Unit, tenant or physical suite designation (e.g., 'Suite 104-A'). Give the type of tenant if no unit ID. e.g: 'Residential Tenant', 'Single Tenant'")
+    unit_size_sf: Optional[int] = Field(None, description="Total space footprint area measured in square feet for the unit.")
+    tenant_name: Optional[str] = Field(..., description="Tenant name, especially for retail. Use 'Vacant' if space is unleased.")
     
-    unit_type_of_ownership: Optional[str] = Field(None, description="Type of ownership: Fee Simple, Leasehold, Joint Venture, etc.")
-    unit_rent_status: Optional[str] = Field(None, description="Status: Vacant, Occupied, Leased but not occupied")
-    unit_rent_start_date: Optional[str] = Field(None, description="Lease commencement date")
-    unit_rent_end_date: Optional[str] = Field(None, description="Lease expiration date")
-    unit_lease_type: Optional[str] = Field(None, description="Lease structure: NNN, NN, Modified Gross, Gross, FSG")
+    # Financial Runs
+    monthly_rent_usd: Optional[float] = Field(None, description="Unit monthly rent.")
+    annual_rent_usd: Optional[float] = Field(None, description="Unit yearly rent, must match 12*monthly rent.")
+    rent_per_sf_yearly: Optional[float] = Field(None, description="Yearly unit rent divided by unit square footage ($/SF/Yr).")
     
-    tenant_name: Optional[str] = Field(None, description="Tenant corporate name (ex: Starbucks, Vacant, Corporate Lease). If the name exists.")
-    tenant_headquarters: Optional[str] = Field(None, description="Tenant headquarters address or city name")
-    tenant_year_founded: Optional[int] = Field(None, description="Year the tenant was founded.")
-    tenant_description: Optional[str] = Field(None, description="Brief 1 to 2 sentences summary of what the tenant is doing")
+    # Lease Lifespan Mechanics
+    lease_start_date: Optional[str] = Field(None, description="Lease commencement or move-in date. Format the date to YYYY-MM-DD. If Month to Month rent, put MTM.")
+    lease_end_date: Optional[str] = Field(None, description="Lease expiration date. Format the date to YYYY-MM-DD. If Month to Month rent, put MTM.")
+    lease_structure_type: Optional[str] = Field(None, description="Specific recovery profile applied to this tenant: NNN, NN, Gross, etc.")
 
-    unit_rent_increases: Optional[str] = Field(None, description="Details about rent increases (ex: 3% annually, $0.50/SF in 2027, CPI linked)")
-    renewal_options: Optional[str] = Field(None, description="Tenant options to renew (ex: Two 5-year options at market rate)")
+    # Escallation Steps & Extensions
+    rent_increases: Optional[str] = Field(None, description="Verbatim steps or escalation schedules text (e.g., '10% every 5 years', '3% annual bumps').")
+    renewal_options: Optional[str] = Field(None, description="Contractual options text to extend beyond maturity (e.g., 'Three 5-Year options at Fair Market Value').")
 
-class RentRollReport(Metainfo):
-    """Full rent roll table extracted from OM pages."""
-    rows: List[RentRollRow] = Field(
-        default_factory=list,
-        description="One row per tenant or unit in the rent roll.",
-    )
+class RentRollReportPerBuilding(BaseModel):
+    """Rent roll of one building."""
+
+    building_name: Optional[str] = Field(None, description="The building name or full address for which the rent roll refers to.")
+    number_tenants_in_building:  Optional[int] = Field(1, description="Total number of tenants in the building. Give number of units if multi units. For hotel give None. A vacancy counts for 1.")
+    rows: Optional[List[RentRollRow]] = Field(default_factory=list, description="Rent roll of one building, as of today. Each Row being one unit or tenant. Vacancy count as one row.")
+
+class RentRollReport(Confidence):
+    """Rent roll of all building."""
+
+    rows: Optional[List[RentRollReportPerBuilding]] = Field(default_factory=list, description="Rent roll of each building, as of today. Each Row being one full rent roll of a building.")
 
 # ==========================================
 # 3. FINANCIAL STATEMENTS (COMBINED & DUAL-COLUMN)
 # ==========================================
 class StandardKPI(BaseModel):
-    """
-    Complete Financial Operating & Income Statement.
-    Captures both revenues and expenses side-by-side (In-Place vs Pro-Forma).
-    """
-
-    revenue_year: Optional[str] = Field(None, description="Year of the revenue recorded. Record as proformat if so.")
-
-    # --- REVENUES (Income) ---
-    gross_potential_rent: Optional[float] = Field(None, description="Gross potential rent (GPR)")
-    vacancy_and_collection_loss: Optional[float] = Field(None, description="Vacancy loss, often a % or absolute negative USD")
-    other_income: Optional[float] = Field(None, description="Total other income (parking, laundry, storage, etc.)")
-    effective_gross_income: Optional[float] = Field(None, description="Effective Gross Income (EGI)")
-
-    # --- EXPENSES (OpEx) ---
-    taxes: Optional[float] = Field(None, description="Real Estate / Property Taxes")
-    insurance: Optional[float] = Field(None, description="Property Insurance")
     
-    # Regrouper les utilities évite que le LLM invente des ventilations arbitraires
-    water_and_sewer: Optional[float] = Field(None, description="Water and Sewer cost")
-    electric: Optional[float] = Field(None, description="Electric cost")
-    gas: Optional[float] = Field(None, description="Gas cost")
-    trash: Optional[float] = Field(None, description="Trash / garbage management cost")
-    utilities_total: Optional[float] = Field(None, description="Total Utilities (Water, Electric, Gas, Trash) combined")
+    """Normalizes typical cash flow arrays across commercial real estate asset models."""
     
-    management_fee: Optional[float] = Field(None, description="Property Management fees")
-    repair_and_maintenance: Optional[float] = Field(None, description="Repairs, maintenance, and turnover costs")
-    general_and_administrative: Optional[float] = Field(None, description="Admin, legal, marketing, and payroll expenses")
-    other_operating_expenses: Optional[float] = Field(None, description="Other operating expenses besides the ones listed above")
-    total_operating_expenses: Optional[float] = Field(None, description="Total Operating Expenses (OpEx)")
+    financial_year: str = Field(..., description="Year of financial statement (e.g., '2025', 'Current', 'Year 1').")
     
-    # --- BOTTOM LINE --- NOI = EGI - Operating Expenses
-    net_operating_income: Optional[float] = Field(None, description="Net Operating Income (NOI)")
+    # --- INCOME STREAMS ---
+    gross_potential_rent: Optional[float] = Field(None, description="Total contractual baseline rents if 100% of physical space were leased at market rates.")
+    expense_reimbursements: Optional[float] = Field(None, description="CAM, tax, and insurance recoveries clawed back from tenants (typical for NNN/retail setup).")
+    other_income: Optional[float] = Field(None, description="Alternative programmatic income (parking fees, common space storage fees, sign leases, etc.).")
+    gross_scheduled_income: Optional[float] = Field(None, description="Sum of Gross Potential Rent + Expense Reimbursements + Other Income.")
+    
+    vacancy_loss: Optional[float] = Field(None, description="Underwritten deduction value accounting for expected vacancy gaps and collection risk defaults.")
+    effective_gross_income: Optional[float] = Field(None, description="Net operating revenues: Gross Scheduled Income minus Vacancy Loss.")
 
-class FinancialStatementExtraction(Metainfo):
-    """
-    Complete Financial Operating & Income Statement.
-    Captures both revenues and expenses side-by-side (In-Place vs Pro-Forma).
-    """
-    historical_and_proforma_years: List[StandardKPI] = Field(
-        default_factory=list,
-        description="List of yearly financial data sheets extracted horizontally from the document.",
-    )
+    # --- EXPENSES (OpEx Shards) ---
+    taxes_property: Optional[float] = Field(None, description="Annual real estate and direct municipal assessment taxes.")
+    insurance: Optional[float] = Field(None, description="Commercial general property liability and casualty risk policies.")
+    utilities_combined: Optional[float] = Field(None, description="Aggregated utility expenses: Water, gas, power grid, and sanitation services.")
+    management_fees: Optional[float] = Field(None, description="Asset and Property Management operational oversight overhead costs.")
+    repairs_and_maintenance: Optional[float] = Field(None, description="Day-to-day physical upkeep, mechanical inspections, structural fixes, and landscaping tasks.")
+    general_and_administrative: Optional[float] = Field(None, description="Administrative back-office run charges: legal support, print collateral, accounting, compliance.")
+    other_operating_expenses: Optional[float] = Field(None, description="Catch-all tracking for items not falling neatly into the major accounts above.")
+    total_operating_expenses: Optional[float] = Field(None, description="Sum of all operational expense lines outlaid.")
 
-class HotelKPIs(BaseModel):
-    """Core hospitality performance indicators for a given year."""
-    rooms_count: Optional[int] = Field(None, description="Total number of rooms keys available (75 in this case)")
-    occupancy_percentage: Optional[float] = Field(None, description="Occupancy rate as a percentage (e.g., 71.0 for 71%)")
-    adr: Optional[float] = Field(None, description="Average Daily Rate in USD ($)")
-    revpar: Optional[float] = Field(None, description="Revenue Per Available Room in USD ($)")
-    revpar_change_percentage: Optional[float] = Field(None, description="Year-over-year RevPAR growth percentage")
+    # --- BOTTOM LINES & METRICS ---
+    net_operating_income: Optional[float] = Field(None, description="Net Operating Income (NOI = Effective Gross Income minus Total Operating Expenses).")
+    cap_rate: Optional[float] = Field(None, description="Capitalization Rate percentage calculated on asking price or baseline asset value valuation (e.g., 6.75)")
+
+class FinancialStatementExtraction(Confidence):
+    """Enables multi-year side-by-side performance matrix runs across underwriting cycles. Focus only on current and past years. No projection"""
+    
+    building_address: Optional[str] = Field(None, description="The building name or full address for which the rent roll refers to.")
+    financial_cycles: Optional[List[StandardKPI]] = Field(default_factory=list, description="Chronological list of financial statements. Each row is a specific year.")
+
+#### hotel specific 
 
 class HotelYearlyData(BaseModel):
-    """Bundles KPIs and line item dollar amounts ($) for a specific fiscal or calendar year."""
+    """Captures absolute dollar amounts ($) and metrics mapped to standard hospitality P&L structures."""
 
-    year: Optional[str] = Field(None, description="The year label, e.g., '2021', '2022', or '2023'")
-    kpis: Optional[HotelKPIs] = Field(None, description="Top-line operational performance metrics")
-    
+    building_name: Optional[str] = Field(None, description="The building name for which the rent roll refers to.")
+    financial_year: Optional[str] = Field(..., description="Year of financial statement (e.g., '2025', 'Current', 'Year 1').")
+    occupancy_percentage: Optional[float] = Field(default=None, description="Occupancy rate expressed as a full float percentage (e.g., 74.5 for 74.5%).")
+    adr: Optional[float] = Field(default=None, description="Average Daily Rate in USD ($) representing room revenue divided by rooms sold.")
+    revpar: Optional[float] = Field(default=None, description="Revenue Per Available Room in USD ($) calculated as ADR multiplied by Occupancy Rate.")
+
     # --- OPERATING REVENUE ($) ---
-    rooms_revenue: Optional[float] = Field(None, description="Revenue generated from room rentals")
-    other_operated_departments_revenue: Optional[float] = Field(None, description="Food & Beverage, minor departments, etc.")
-    miscellaneous_income: Optional[float] = Field(None, description="Other minor operating income streams")
-    total_operating_revenue: Optional[float] = Field(None, description="Total Gross Operating Revenue")
+    revenue_rooms: Optional[float] = Field(default=None, description="Total gross revenue generated from guest room rentals.")
+    revenue_food_and_beverage: Optional[float] = Field(default=None, description="Revenue generated from restaurants, bars, banquets, and room service operations.")
+    revenue_other_operated_departments: Optional[float] = Field(default=None, description="Revenue from minor departments like spa, golf, parking, laundry, or retail spaces.")
+    revenue_miscellaneous: Optional[float] = Field(default=None, description="Other minor non-departmental revenue streams (e.g., cancellation fees, resort fees).")
+    total_operating_revenue: Optional[float] = Field(default=None, description="Gross Operating Revenue. Sum of Rooms, F&B, Other Departments, and Misc Income.")
 
-    # --- DEPARTMENTAL EXPENSES ($) ---
-    rooms_expense: Optional[float] = Field(None, description="Direct expenses related to rooms (housekeeping, laundry, etc.)")
-    total_departmental_expenses: Optional[float] = Field(None, description="Sum of all direct departmental expenses")
-    total_departmental_profit: Optional[float] = Field(None, description="Total Departmental Profit")
-
+    expense_rooms: Optional[float] = Field(default=None, description="Direct payroll and line expenses related to rooms (housekeeping, laundry, front desk).")
+    expense_food_and_beverage: Optional[float] = Field(default=None, description="Direct cost of goods sold (COGS) and labor for all restaurant and banquet outlets.")
+    expense_other_operated_departments: Optional[float] = Field(default=None, description="Direct operational costs tied to running minor profit centers (spa, parking, etc.).")
+    total_departmental_expenses: Optional[float] = Field(default=None, description="Sum total of all direct departmental performance costs.")
+    total_departmental_profit: Optional[float] = Field(default=None, description="Total Departmental Profit (Total Operating Revenue minus Total Departmental Expenses).")
+  
     # --- UNDISTRIBUTED OPERATING EXPENSES ($) ---
-    administrative_and_general: Optional[float] = Field(None, description="A&G expenses, payroll, legal")
-    it_and_telecommunications: Optional[float] = Field(None, description="Information and telecom systems")
-    sales_and_marketing: Optional[float] = Field(None, description="Marketing, advertising, and franchise sales efforts")
-    franchise_fees: Optional[float] = Field(None, description="Franchise / Royalty fees paid to the brand")
-    property_operations_and_maintenance: Optional[float] = Field(None, description="POM expenses, engineering, repairs")
-    utilities: Optional[float] = Field(None, description="Electricity, water, gas, waste management")
-    total_undistributed_operating_expenses: Optional[float] = Field(None, description="Total Undistributed Operating Expenses")
-
-    # --- PROFITS & FEES ($) ---
-    gross_operating_profit: Optional[float] = Field(None, description="Gross Operating Profit (GOP)")
-    total_management_fees: Optional[float] = Field(None, description="Base and incentive management fees")
-    income_before_non_operating: Optional[float] = Field(None, description="Income Before Non-Operating Income & Expenses")
-
-    # --- NON-OPERATING INCOME & EXPENSES ($) ---
-    property_and_other_taxes: Optional[float] = Field(None, description="Real Estate and Property Taxes")
-    insurance: Optional[float] = Field(None, description="Property and liability insurance")
-    total_non_operating_income_and_expenses: Optional[float] = Field(None, description="Sum of fixed/non-operating costs")
-
+    administrative_and_general: Optional[float] = Field(default=None, description="A&G support expenses: Executive payroll, HR, legal fees, accounting, and compliance.")
+    information_and_telecom: Optional[float] = Field(default=None, description="IT systems, property management software licenses (PMS), Wi-Fi infra, and phone lines.")
+    sales_and_marketing: Optional[float] = Field(default=None, description="Marketing campaigns, commissions, local advertising, and loyalty program costs.")
+    franchise_fees: Optional[float] = Field(default=None, description="Contractual royalty and brand flag pipeline distribution fees paid to the franchisor.")
+    property_operations_and_maintenance: Optional[float] = Field(default=None, description="POM / Engineering charges: mechanical checks, physical repairs, and grounds maintenance.")
+    utilities_combined: Optional[float] = Field(default=None, description="Combined energy footprints: Electricity, water, natural gas, and waste disposal management.")
+    
+    total_undistributed_expenses: Optional[float] = Field(default=None, description="Sum of all indirect overhead support operational expenses.")
+    gross_operating_profit: Optional[float] = Field(default=None, description="GOP (Total Departmental Profit minus Total Undistributed Expenses). Key manager metric.")
+    management_fees_total: Optional[float] = Field(default=None, description="Total operational base and incentive fees paid out to the third-party management group.")
+    income_before_non_operating: Optional[float] = Field(default=None, description="GOP after management fees (Gross Operating Profit minus Management Fees Total).")
+    taxes_property: Optional[float] = Field(default=None, description="Real estate, personal property, and direct municipal assessment taxes.")
+    insurance_building: Optional[float] = Field(default=None, description="Commercial general liability, structural property, and casualty insurance premiums.")
+    other_fixed_charges: Optional[float] = Field(default=None, description="Equipment lease costs, ground rents, or alternative fixed non-operating items.")
+    total_non_operating_expenses: Optional[float] = Field(default=None, description="Sum of property taxes, insurance, and alternative fixed non-operating overhead charges.")
+    
     # --- BOTTOM LINES ($) ---
-    ebitda: Optional[float] = Field(None, description="EBITDA / Adjusted GOP")
-    replacement_reserve: Optional[float] = Field(None, description="FF&E Reserve (Furniture, Fixtures, and Equipment)")
-    net_operating_income: Optional[float] = Field(None, description="Net Operating Income (NOI)")
+    ebitda: Optional[float] = Field(default=None, description="EBITDA / Adjusted GOP (Income Before Non-Operating minus Total Non-Operating Expenses).")
+    ffe_replacement_reserve: Optional[float] = Field(default=None, description="Furniture, Fixtures, and Equipment (FF&E) escrow capital reserve bucket allocation.")
+    net_operating_income: Optional[float] = Field(default=None, description="Final operational yield baseline: Net Operating Income (EBITDA minus FF&E Replacement Reserve).")
 
-
-class FinancialStatementExtractionHotel(Metainfo):
-    """
-    Complete Financial Operating & Income Statement for Hospitality/Hotel Assets.
-    Captures multi-year arrays focusing purely on absolute dollar amounts ($).
-    """
-
-    historical_and_proforma_years: List[HotelYearlyData] = Field(
-        default_factory=list,
-        description="List of yearly financial data sheets extracted horizontally from the document.",
-    )
+class FinancialStatementExtractionHotel(Confidence):
+    """Complete Financial Operating & Income Statement for Hospitality/Hotel Assets."""
+    
+    financial_cycles: Optional[List[HotelYearlyData]] = Field(default_factory=list, description="Chronological list of financial statements. Each row is a specific year.")
 
 # ==========================================
 # 4. PROPERTY CONDITION REPORT
 # ==========================================
-class HotelInfosSpecific(Metainfo):
-    """Technical and physical structural constraints from the OM text."""
-
-    number_of_floors: Optional[int] = Field(None, description="Number of floors of the property, also called stories.")
-    number_of_rooms: Optional[int] = Field(None, description="Number of rooms of the property.")
-    number_of_beds: Optional[int] = Field(None, description="Number of beds of the property.")
-
 class Amenity(BaseModel):
     """Amenity description of the property, besides the hotel rooms amenities."""
     name: Optional[str] = Field(None, description="Name of the amenity: pool, gym, spa, meeting rooms, event space, parking.")
     amenity_description: Optional[str] = Field(None, description="Description of the amenity.")
-    amenity_size: Optional[str] = Field(None, description="Size in square feet of the amenity.")
-    amenity_condition: Optional[str] = Field(None, description="Condition of the amenity: good, bad, needs repair, etc. If not stated, set to 'good'.")
-    number_of_unit_of_the_amenity: Optional[int] = Field(None, description="Number of units of this amenity.")
+    amenity_size: Optional[int] = Field(None, description="Size in square feet of the amenity.")
 
-class Amenities(Metainfo):
-    """Amenities of the property."""
+class Amenities(Confidence):
+    """Amenities of the hotel."""
     amenities: Optional[List[Amenity]] = Field(None, description="List of amenities of the property (ex: pool, gym, spa, meeting rooms, parking, etc.)")
-
-class BuildingInformation(BaseModel):
-    """Technical and physical structural constraints from the OM text."""
-
-    year_built: Optional[int] = Field(None, description="Year built original")
-    year_renovated: Optional[int] = Field(None, description="Year of last major renovation, 'None' if blank")
-    construction_type: Optional[str] = Field(None, description="Construction type: wood frame, masonry, steel, concrete tilt-up")
-    roof_condition: Optional[str] = Field(None, description="Roof condition notes or rating")
-    roof_age: Optional[int] = Field(None, description="Roof age in years or date of last replacement")
-    building_height: Optional[int] = Field(None, description="Building height in feet.")
-    building_dimensions: Optional[str] = Field(None, description="Building dimensions in square feet.")
-    parking_spaces: Optional[int] = Field(None, description="Number of parking spaces.")
-
-    hvac_system_condition: Optional[str] = Field(None, description="HVAC details: Age, central vs individual units, tenant vs landlord responsibility")
-    zoning_urban: Optional[str] = Field(None, description="Official zoning code (ex: C-3, M-1, GR) and overlay if any")
-    flood_zone: Optional[str] = Field(None, description="Flood zone of the property: A, B, C, X, etc.")
-    deferred_maintenance: Optional[str] = Field(None, description="Any explicit mention of immediate repairs needed (Deferred Maintenance)")
 
 # ==========================================
 # 5. Demographics / attractiveness Report
@@ -249,45 +245,45 @@ class PointOfInterest(BaseModel):
     """A point of interest."""
     name: Optional[str] = Field(None, description="Name of the point of interest.")
     distance: Optional[float] = Field(None, description="Distance from the property in miles.")
-    type: Optional[str] = Field(None, description="Type of the point of interest: restaurant, hotel, shopping center, etc.")
-    description: Optional[str] = Field(None, description="Description of the point interest and why this is interesting..")
+    description: Optional[str] = Field(None, description="One sentence description of the point interest and why this is interesting.")
 
-class ZoneAttractiveness(Metainfo):
+class ZoneAttractiveness(BaseModel):
     """Close points of interest ."""
     zone_attractiveness: Optional[List[PointOfInterest]] = Field(None, description="List of points of interest close to the property.")
 
 class DemographicColumn(BaseModel):
     """Represents a specific demographic catchment area (e.g., 1-Mile Radius, 10-Min Drive Time)."""
     
-    area_type: Optional[str] = Field(None, description="The scope of the column. Examples: '1-Mile Radius', '3-Mile Radius', '5-Mile Radius', '10-Min Drive Time'.")
-    total_population: Optional[int] = Field(None, description="Total population within this area.")
-    population_growth_percentage: Optional[float] = Field(None, description="Historical or projected population growth rate (ex: +1.2% annually or 5-year projection).")
-    number_of_households: Optional[int] = Field(None, description="Total number of households (foyers) in the area.")
-    people_per_household: Optional[float] = Field(None, description="Average number of people per household in the area.")
-    median_age: Optional[float] = Field(None, description="The median age of the population in this area.")
-    average_age: Optional[float] = Field(None, description="The average age of the population in this area.")
-
+    radius_label: Optional[str] = Field(None, description="Radius of the statistics around the offer address (e.g., '1-Mile', '5-Mile').")
+    total_population: Optional[int] = Field(None, description="Total population within the radius.")
+    population_growth_projection: Optional[float] = Field(None, description="Historical or projected population growth rate (ex: +1.2% annually or 5-year projection).")
+    total_households: Optional[int] = Field(None, description="Total number of households (foyers) in the radius.")
+    
+    people_per_household: Optional[float] = Field(None, description="Average number of people per household in the radius.")
+    median_age: Optional[float] = Field(None, description="The median age of the population in this radius.")
+    average_age: Optional[float] = Field(None, description="The average age of the population in this radius.")
+   
     average_household_income: Optional[float] = Field(None, description="Average Household Income in USD (often abbreviated as AHHI).")
     median_household_income: Optional[float] = Field(None, description="Median Household Income in USD.")
     
-    percentage_white: Optional[float] = Field(None, description="Percentage of white population in the area.")
-    percentage_black: Optional[float] = Field(None, description="Percentage of black population in the area.")
-    percentage_asian: Optional[float] = Field(None, description="Percentage of asian population in the area.")
-    percentage_other: Optional[float] = Field(None, description="Percentage of other population in the area.")
+    percentage_white: Optional[float] = Field(None, description="Percentage of white population in the radius. Deduce from population volume of white amongst total, if possible.")
+    percentage_black: Optional[float] = Field(None, description="Percentage of black population in the radius. Deduce from population volume of black amongst total, if possible.")
+    percentage_asian: Optional[float] = Field(None, description="Percentage of asian population in the radius. Deduce from population volume of asian amongst total, if possible.")
+    percentage_other: Optional[float] = Field(None, description="Percentage of other population in the radius. It should be the remaining % as of 100 - (white + black + asian)")
 
-class MarketDemographicsReport(Metainfo):
+class MarketDemographicsReport(Confidence):
     """
     Table extracted from the market analysis or demographics page of the OM.
     Captures multi-radius or multi-drive-time data dynamically.
     """
     
     # Liste dynamique des colonnes de rayons (1, 3, 5 miles ou autres)
-    catchment_areas: Optional[List[DemographicColumn]] = Field(default=[], description="List of demographic metrics broken down by radius or drive time columns found in the OM.")
+    area_statistics : Optional[List[DemographicColumn]] = Field(default=[], description="List of demographic metrics broken down by radius.")
 
 # ==========================================
 # 6. Auction Information
 # ==========================================
-class AuctionInformation(Metainfo):
+class AuctionInformation(Confidence):
     """Information about the auction."""
 
     auction_date_start: Optional[str] = Field(None, description="Date of the auction start.")
@@ -299,21 +295,3 @@ class AuctionInformation(Metainfo):
     auction_url: Optional[str] = Field(None, description="URL of the auction.")
     auction_has_reserved_price: Optional[bool] = Field(None, description="Whether the auction has a reserved price.")
     auction_reserve_price: Optional[float] = Field(None, description="Reserve price of the auction in USD.")
-
-
-#### vision table extraction
-
-class VisionTableExtraction(BaseModel):
-    """
-    Table extracted from a page image (rent roll, financial summary, etc.).
-    Strict shape for ``response_mime_type=application/json`` validation.
-    """
-
-    page_kind: str = Field(
-        description="rent_roll | financial_summary | other",
-    )
-    title: str = ""
-    columns: list[str] = Field(default_factory=list)
-    rows: list[list[str]] = Field(default_factory=list)
-    confidence: str = Field(default="medium")
-    raw_notes: str = ""

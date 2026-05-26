@@ -95,6 +95,10 @@ class AppContext:
     @property
     def google_api_key(self) -> Optional[str]:
         return os.environ.get("GOOGLE_API_KEY", None)
+
+    @property
+    def openai_api_key(self) -> Optional[str]:
+        return os.environ.get("OPENAI_API_KEY", None)
     
     @property
     def gemini_model_fast(self) -> Optional[str]:

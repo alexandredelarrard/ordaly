@@ -1,15 +1,10 @@
-"""Thresholds for two-tier PDF parse (PyMuPDF + Camelot → optional Gemini vision)."""
+"""Thresholds for PDF parse (PyMuPDF text tier + optional Gemini vision)."""
 
 # --- Fast-track (native PDF) heuristics ---
 # Below this total character count, treat as scanned / empty and prefer vision path.
 MIN_CHARS_NATIVE_LIKELY: int = 400
 # Minimum alphanumeric ratio (0–1) on non-whitespace chars to trust extracted text.
 MIN_ALNUM_RATIO: float = 0.45
-
-# --- Camelot ---
-MAX_CAMELOT_PAGES_PER_DOC: int = 50
-MAX_TABLE_ROWS_SANE: int = 300
-MIN_TABLE_ROWS_MEANINGFUL: int = 2
 
 # --- Vision fallback (Gemini + pdf2image) ---
 MAX_VISION_PAGES_SCANNED_PDF: int = 15

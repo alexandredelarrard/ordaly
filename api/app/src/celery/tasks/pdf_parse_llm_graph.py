@@ -1,8 +1,9 @@
 """
 LangGraph workflow for PDF text-tier LLM extraction.
 
-Flow: pages of interest → metadata → parallel auxiliary schemas (standard vs hotel)
-→ optional auction node.
+Flow: metadata (full document) → parallel auxiliary schemas (by ``asset_type``)
+→ optional auction → **final_alignment_check** (Gemini Pro: returns ``OmFinalAlignmentBundle`` vs full OM + aggregated JSON).
+Each extraction node uses ``TEXT_SCHEMA_PROMPT_FILES`` for its schema key.
 """
 
 from __future__ import annotations
@@ -30,15 +31,9 @@ def _merge_extractions(
 
 class PdfParseLlmState(TypedDict, total=False):
     page_texts: list[str]
-    camelot_tables: list[dict[str, Any]]
     extractions: Annotated[dict[str, Any], _merge_extractions]
 
-
 _FINAL_SCHEMA_KEYS: tuple[str, ...] = tuple(schemas_dict.keys())
-
-_HOTEL_ASSET_TOKENS: frozenset[str] = frozenset(
-    ("hotel", "hospitality", "lodging", "resort", "motel", "inn", "hostel", "casino")
-)
 
 
 def _metadata_dict(state: PdfParseLlmState) -> dict[str, Any]:
@@ -46,17 +41,11 @@ def _metadata_dict(state: PdfParseLlmState) -> dict[str, Any]:
     return raw if isinstance(raw, dict) else {}
 
 
-def route_after_metadata(state: PdfParseLlmState) -> Literal["hotel_path", "standard_path"]:
-    meta = _metadata_dict(state)
-    asset = (meta.get("asset_type") or "").strip().lower()
-    if any(tok in asset for tok in _HOTEL_ASSET_TOKENS):
-        return "hotel_path"
-    return "standard_path"
-
-
 def route_after_auxiliary(state: PdfParseLlmState) -> Literal["auction", "done"]:
     meta = _metadata_dict(state)
-    sale = (meta.get("type_of_sale") or "").strip().lower()
+    sale = (
+        meta.get("type_of_sale") or meta.get("transaction_type") or ""
+    ).strip().lower()
     if sale in ("auction", "auctions", "auction sale"):
         return "auction"
     return "done"
@@ -68,40 +57,22 @@ def _empty_extractions() -> dict[str, Any | None]:
 
 def build_pdf_parse_llm_graph(bridge: PdfParseGptBridge):
     """Compile a fresh graph bound to ``bridge`` node callables."""
+    
     g = StateGraph(PdfParseLlmState)
-
-    g.add_node("extract_pages_of_interest", bridge.node_extract_pages_of_interest)
+    
     g.add_node("extract_metadata", bridge.node_extract_metadata)
+    g.add_node("extract_pages", bridge.node_extract_pages)
     g.add_node(
-        "extract_auxiliary_parallel_standard",
-        bridge.node_extract_auxiliary_parallel_standard,
-    )
-    g.add_node(
-        "extract_auxiliary_parallel_hotel",
-        bridge.node_extract_auxiliary_parallel_hotel,
+        "extract_auxiliary_parallel_routed",
+        bridge.node_extract_auxiliary_parallel_routed,
     )
     g.add_node("extract_auction_information", bridge.node_extract_auction_information)
 
-    g.add_edge(START, "extract_pages_of_interest")
-    g.add_edge("extract_pages_of_interest", "extract_metadata")
+    g.add_edge(START, "extract_metadata")
+    g.add_edge("extract_metadata", "extract_pages")
+    g.add_edge("extract_pages", "extract_auxiliary_parallel_routed")
     g.add_conditional_edges(
-        "extract_metadata",
-        route_after_metadata,
-        {
-            "hotel_path": "extract_auxiliary_parallel_hotel",
-            "standard_path": "extract_auxiliary_parallel_standard",
-        },
-    )
-    g.add_conditional_edges(
-        "extract_auxiliary_parallel_standard",
-        route_after_auxiliary,
-        {
-            "auction": "extract_auction_information",
-            "done": END,
-        },
-    )
-    g.add_conditional_edges(
-        "extract_auxiliary_parallel_hotel",
+        "extract_auxiliary_parallel_routed",
         route_after_auxiliary,
         {
             "auction": "extract_auction_information",
@@ -115,8 +86,7 @@ def build_pdf_parse_llm_graph(bridge: PdfParseGptBridge):
 
 def run_pdf_parse_llm_graph(
     bridge: PdfParseGptBridge,
-    page_texts: list[str],
-    camelot_tables: list[dict[str, Any]],
+    page_texts: list[str]
 ) -> dict[str, Any | None]:
     """
     Run the extraction graph and return the merged ``extractions`` dict
@@ -124,7 +94,9 @@ def run_pdf_parse_llm_graph(
     """
     if not bridge.api_key:
         logger.warning(
-            "run_pdf_parse_llm_graph skipped: GOOGLE_API_KEY is missing or empty"
+            "run_pdf_parse_llm_graph skipped: no API key for provider %r "
+            "(set GOOGLE_API_KEY when gpt.default_api is google, or OPENAI_API_KEY when openai)",
+            getattr(bridge, "llm_provider", "google"),
         )
         return _empty_extractions()
 
@@ -132,8 +104,8 @@ def run_pdf_parse_llm_graph(
     final: PdfParseLlmState = app.invoke(
         {
             "page_texts": page_texts,
-            "camelot_tables": camelot_tables,
             "extractions": {},
         }
     )
-    return final.get("extractions") or _empty_extractions()
+    merged = final.get("extractions") or {}
+    return {**_empty_extractions(), **merged}

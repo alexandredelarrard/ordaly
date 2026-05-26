@@ -20,7 +20,7 @@ RUN apt-get update &&\
 # Install requirements
 RUN pip install --upgrade pip
 RUN pip install --no-cache-dir -r requirements.txt \
-    && python -c "import camelot; import cv2; print('camelot', camelot.__version__, 'cv2 OK')"
+    && python -c "import pymupdf; print('pymupdf', getattr(pymupdf, '__version__', 'ok'))"
 
 EXPOSE 8000
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

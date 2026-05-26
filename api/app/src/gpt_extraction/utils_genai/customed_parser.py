@@ -9,6 +9,33 @@ from langchain_core.runnables import Runnable
 from pydantic import Field
 
 
+def _message_content_to_str(content: Any) -> str:
+    """
+    LangChain message ``content`` is usually a string; Gemini / multimodal chains
+    may return a list of blocks like ``[{"type": "text", "text": "..."}]``.
+    Regex-based JSON cleanup requires a real string.
+    """
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict):
+                t = block.get("text")
+                if t is not None:
+                    parts.append(str(t))
+                elif block.get("type") == "text" and isinstance(block.get("content"), str):
+                    parts.append(block["content"])
+            else:
+                parts.append(str(block))
+        return "\n".join(parts)
+    return str(content)
+
+
 class RobustJSONParser(Runnable):
     def __init__(self, parser: PydanticOutputParser):
         self.parser = parser
@@ -17,7 +44,7 @@ class RobustJSONParser(Runnable):
 
     def invoke(self, input, config=None):
         if isinstance(input, (AIMessage, HumanMessage)):
-            text = input.content
+            text = _message_content_to_str(input.content)
         elif isinstance(input, Field):
             text = None
         elif isinstance(input, dict):
@@ -38,9 +65,11 @@ class RobustJSONParser(Runnable):
         else:
             return obj
 
-    def parse(self, text: str) -> Any:
+    def parse(self, text: Any) -> Any:
         cleaned_text = ""
         try:
+            if not isinstance(text, str):
+                text = _message_content_to_str(text) if isinstance(text, list) else str(text)
             # 1. Sanitize the string to remove code fences and fix escapes
             cleaned_text = self._sanitize_json_output(text)
 

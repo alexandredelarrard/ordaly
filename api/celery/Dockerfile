@@ -20,7 +20,7 @@ COPY app/requirements.txt /app/requirements.txt
 COPY celery/requirements-celery.txt /app/requirements-celery.txt
 
 RUN pip install --upgrade pip && pip install --no-cache-dir -r /app/requirements-celery.txt \
-    && python -c "import camelot; import cv2; print('camelot', camelot.__version__, 'cv2 OK')"
+    && python -c "import pymupdf; print('pymupdf', getattr(pymupdf, '__version__', 'ok'))"
 
 COPY app/ /app/
 
