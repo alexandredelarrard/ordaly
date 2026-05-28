@@ -3,6 +3,11 @@ Build a styled multi-sheet XLSX from ``text_llm_by_schema`` (LLM extraction payl
 
 Sheets (see ``EXCEL_WORKBOOK_SHEETS``): ``summary``, ``offer_pictures``, ``rent_roll``,
 ``financial_statement``, ``building_report``, ``demographics_report``.
+
+When ``source_pdf_path`` is set, each sheet embeds **key PDF pages** from
+``page_extraction`` (see ``EXCEL_SHEET_PAGE_OF_INTEREST_FIELDS``) **below** the main
+tables / content, at a **larger** resolution than the legacy offer-picture preset
+(see ``_EMBED_MAX_WIDTH_PX`` / ``_EMBED_RENDER_ZOOM``).
 """
 
 from __future__ import annotations
@@ -82,8 +87,12 @@ _FMT_NUMBER = "#,##0.##"
 
 _SHEET_WHITE_ROWS = 120
 _SHEET_WHITE_COLS = 20
-_PICTURE_MAX_WIDTH_PX = 720
-_PDF_RENDER_ZOOM = 2.0
+# Default cap for scaled PNG width (Excel display pixels). Used when no override.
+_PICTURE_MAX_WIDTH_PX = 1080
+# Sharper / wider raster for “key pages” blocks (all sheets + offer pictures).
+_EMBED_MAX_WIDTH_PX = 1440
+_EMBED_RENDER_ZOOM = 2.85
+_PDF_RENDER_ZOOM = 2.35
 
 _METAINFO_KEY = "page_number"
 _YEAR_LABEL_KEYS = frozenset({"kpi_year", "revenue_year", "year", "year_label", "financial_year"})
@@ -542,13 +551,20 @@ def _pages_for_sheet(data: dict[str, Any], sheet_name: str, *legacy_sections: An
     return ", ".join(parts)
 
 
-def _render_pdf_page_png(pdf_path: Path, page_num_1based: int) -> bytes | None:
+def _render_pdf_page_png(
+    pdf_path: Path,
+    page_num_1based: int,
+    *,
+    zoom: float | None = None,
+) -> bytes | None:
     """Rasterize one PDF page to PNG bytes (``page_num_1based`` is 1-based)."""
     try:
         import pymupdf
     except ImportError:
         logger.warning("pymupdf not installed — cannot render offer pictures.")
         return None
+
+    z = float(zoom) if zoom is not None else float(_PDF_RENDER_ZOOM)
 
     try:
         doc = _open_pdf_sanitized(pdf_path)
@@ -557,7 +573,7 @@ def _render_pdf_page_png(pdf_path: Path, page_num_1based: int) -> bytes | None:
             if idx < 0 or idx >= doc.page_count:
                 return None
             page = doc[idx]
-            mat = pymupdf.Matrix(_PDF_RENDER_ZOOM, _PDF_RENDER_ZOOM)
+            mat = pymupdf.Matrix(z, z)
             pix = page.get_pixmap(matrix=mat, alpha=False)
             return pix.tobytes("png")
         finally:
@@ -567,18 +583,26 @@ def _render_pdf_page_png(pdf_path: Path, page_num_1based: int) -> bytes | None:
         return None
 
 
-def _scaled_xl_image(png_bytes: bytes) -> XLImage | None:
+def _scaled_xl_image(
+    png_bytes: bytes,
+    *,
+    max_width_px: int | None = None,
+) -> XLImage | None:
     try:
         from PIL import Image as PILImage
     except ImportError:
         logger.warning("Pillow not installed — cannot embed offer pictures.")
         return None
 
+    cap = int(max_width_px) if max_width_px is not None else int(_PICTURE_MAX_WIDTH_PX)
+    if cap < 1:
+        cap = int(_PICTURE_MAX_WIDTH_PX)
+
     pil = PILImage.open(io.BytesIO(png_bytes))
     w, h = pil.size
     if w <= 0 or h <= 0:
         return None
-    scale = min(1.0, _PICTURE_MAX_WIDTH_PX / w)
+    scale = min(1.0, cap / w)
     disp_w = max(int(w * scale), 1)
     disp_h = max(int(h * scale), 1)
     buf = io.BytesIO()
@@ -594,6 +618,119 @@ def _scaled_xl_image(png_bytes: bytes) -> XLImage | None:
 def _anchor_image_rows(image_height_px: int) -> int:
     """Approximate Excel row span for a floating image."""
     return max(int(image_height_px / 15) + 3, 6)
+
+
+def _embed_pdf_screenshots_block(
+    ws: Any,
+    row: int,
+    data: dict[str, Any],
+    *,
+    poi_fields: str | tuple[str, ...],
+    source_pdf_path: Path | None,
+    banner_title: str,
+    render_zoom: float | None = None,
+    max_width_px: int | None = None,
+) -> int:
+    """
+    Append rasterized PDF pages (from ``page_extraction`` POI fields) under ``row``.
+
+    Uses ``render_zoom`` / ``max_width_px`` when set; otherwise ``_EMBED_RENDER_ZOOM`` /
+    ``_EMBED_MAX_WIDTH_PX`` for larger, sharper sheet screenshots than the legacy cap.
+    """
+    pages = _page_list_for_poi_fields(data, poi_fields)
+    pdf_ok = source_pdf_path is not None and Path(source_pdf_path).is_file()
+    if not pages:
+        return row
+    if not pdf_ok:
+        logger.warning("%s: skipping PDF screenshots (path missing or not found).", banner_title)
+        return row
+
+    z = float(render_zoom) if render_zoom is not None else float(_EMBED_RENDER_ZOOM)
+    cap = int(max_width_px) if max_width_px is not None else int(_EMBED_MAX_WIDTH_PX)
+    if cap < 1:
+        cap = int(_EMBED_MAX_WIDTH_PX)
+
+    pdf_path = Path(source_pdf_path).resolve()
+    cur_w = ws.column_dimensions["A"].width
+    try:
+        base_w = float(cur_w) if cur_w is not None else 20.0
+    except (TypeError, ValueError):
+        base_w = 20.0
+    # Wider column so large images are usable in Excel (width is in “character units”).
+    ws.column_dimensions["A"].width = max(base_w, min(120.0, 18.0 + cap / 90.0))
+
+    row += 1
+    last_col = max(int(ws.max_column or 1), 6)
+    row = _write_section_banner(ws, row, banner_title, last_col)
+
+    embedded = 0
+    for page_num in pages:
+        png = _render_pdf_page_png(pdf_path, page_num, zoom=z)
+        if not png:
+            continue
+        xl_img = _scaled_xl_image(png, max_width_px=cap)
+        if xl_img is None:
+            continue
+
+        ws.cell(row=row, column=1, value=f"Page {page_num}").font = _SECTION_FONT
+        ws.cell(row=row, column=1).fill = _SECTION_FILL
+        ws.cell(row=row, column=1).border = _BORDER
+        row += 1
+
+        ws.add_image(xl_img, f"A{row}")
+        row += _anchor_image_rows(int(xl_img.height))
+        embedded += 1
+        row += 1
+
+    if embedded == 0:
+        miss = ws.cell(
+            row=row,
+            column=1,
+            value="Could not render PDF pages for this section (check PyMuPDF / Pillow).",
+        )
+        miss.font = _BODY_FONT
+        row += 1
+
+    return row
+
+
+# Workbook tab name (``EXCEL_WORKBOOK_SHEETS``) → section banner for PDF screenshots.
+_EXCEL_KEY_PAGES_BANNER: dict[str, str] = {
+    "summary": "Summary — key PDF pages (screenshots)",
+    "offer_pictures": "Property pictures — key PDF pages (screenshots)",
+    "rent_roll": "Rent roll — key PDF pages (screenshots)",
+    "financial_statement": "Financial statement — key PDF pages (screenshots)",
+    "building_report": "Building report — key PDF pages (screenshots)",
+    "demographics_report": "Demographics & attractiveness — key PDF pages (screenshots)",
+}
+
+
+def _embed_excel_sheet_key_pages_below(
+    ws: Any,
+    row: int,
+    data: dict[str, Any],
+    sheet_key: str,
+    source_pdf_path: Path | None,
+) -> int:
+    """
+    Append screenshots for the ``PageOfInterest`` field(s) mapped to this Excel tab
+    (see ``EXCEL_SHEET_PAGE_OF_INTEREST_FIELDS``), using embed zoom / max width.
+    """
+    poi = EXCEL_SHEET_PAGE_OF_INTEREST_FIELDS.get(sheet_key)
+    if not poi:
+        return row
+    banner = _EXCEL_KEY_PAGES_BANNER.get(
+        sheet_key,
+        f"{sheet_key.replace('_', ' ').title()} — key PDF pages (screenshots)",
+    )
+    return _embed_pdf_screenshots_block(
+        ws,
+        row,
+        data,
+        poi_fields=poi,
+        source_pdf_path=source_pdf_path,
+        banner_title=banner,
+    )
 
 
 # Keys stored on each ``Leases`` item (schema); repeated unit/rent fields come from ``RentRollRow``.
@@ -1305,7 +1442,12 @@ def _write_rent_roll_transposed_table(
 # ---------------------------------------------------------------------------
 
 
-def _build_summary_sheet(ws: Any, data: dict[str, Any]) -> bool:
+def _build_summary_sheet(
+    ws: Any,
+    data: dict[str, Any],
+    *,
+    source_pdf_path: Path | None = None,
+) -> bool:
     _init_sheet_canvas(ws)
     meta = data.get("metadata_from_text") if isinstance(data.get("metadata_from_text"), dict) else {}
     scalars = _metadata_scalar_block(meta)
@@ -1349,10 +1491,16 @@ def _build_summary_sheet(ws: Any, data: dict[str, Any]) -> bool:
     if offers:
         row = _write_offer_lines_matrix(ws, row, offers, data=data)
     _autosize_columns(ws, max(ws.max_column, 6))
+    _embed_excel_sheet_key_pages_below(ws, row, data, "summary", source_pdf_path)
     return True
 
 
-def _build_financial_sheet(ws: Any, data: dict[str, Any]) -> bool:
+def _build_financial_sheet(
+    ws: Any,
+    data: dict[str, Any],
+    *,
+    source_pdf_path: Path | None = None,
+) -> bool:
     _init_sheet_canvas(ws)
     fin_key = _pick_financial_key(data)
     if not fin_key:
@@ -1376,10 +1524,16 @@ def _build_financial_sheet(ws: Any, data: dict[str, Any]) -> bool:
     row = _write_section_banner(ws, row, "Line items", max(ncol, 2))
     row = _write_financial_matrix(ws, row, years, fin_key=fin_key)
     _autosize_columns(ws, max(ws.max_column, 2))
+    _embed_excel_sheet_key_pages_below(ws, row, data, "financial_statement", source_pdf_path)
     return True
 
 
-def _build_rent_roll_sheet(ws: Any, data: dict[str, Any]) -> bool:
+def _build_rent_roll_sheet(
+    ws: Any,
+    data: dict[str, Any],
+    *,
+    source_pdf_path: Path | None = None,
+) -> bool:
     _init_sheet_canvas(ws)
     rr = data.get("rent_roll_report")
     if not isinstance(rr, dict):
@@ -1410,10 +1564,16 @@ def _build_rent_roll_sheet(ws: Any, data: dict[str, Any]) -> bool:
             building_index=bidx,
         )
     _autosize_columns(ws, max(ws.max_column, 2))
+    _embed_excel_sheet_key_pages_below(ws, row, data, "rent_roll", source_pdf_path)
     return True
 
 
-def _build_building_sheet(ws: Any, data: dict[str, Any]) -> bool:
+def _build_building_sheet(
+    ws: Any,
+    data: dict[str, Any],
+    *,
+    source_pdf_path: Path | None = None,
+) -> bool:
     _init_sheet_canvas(ws)
     building_raw = data.get("building_report") if isinstance(data.get("building_report"), dict) else {}
     raw_assets = building_raw.get("assets")
@@ -1433,10 +1593,16 @@ def _build_building_sheet(ws: Any, data: dict[str, Any]) -> bool:
     row = _write_section_banner(ws, row, "Buildings", max(ncol, 2))
     row = _write_list_matrix(ws, row, assets, label_section="building_report")
     _autosize_columns(ws, max(ws.max_column, 2))
+    _embed_excel_sheet_key_pages_below(ws, row, data, "building_report", source_pdf_path)
     return True
 
 
-def _build_demographics_sheet(ws: Any, data: dict[str, Any]) -> bool:
+def _build_demographics_sheet(
+    ws: Any,
+    data: dict[str, Any],
+    *,
+    source_pdf_path: Path | None = None,
+) -> bool:
     _init_sheet_canvas(ws)
     demo = data.get("demographics_report") if isinstance(data.get("demographics_report"), dict) else {}
     cols = demo.get("area_statistics")
@@ -1458,6 +1624,7 @@ def _build_demographics_sheet(ws: Any, data: dict[str, Any]) -> bool:
     row = _write_section_banner(ws, row, "Catchment statistics", max(ncol, 2))
     row = _write_list_matrix(ws, row, cols, label_section="demographics_report")
     _autosize_columns(ws, max(ws.max_column, 2))
+    _embed_excel_sheet_key_pages_below(ws, row, data, "demographics_report", source_pdf_path)
     return True
 
 
@@ -1477,7 +1644,7 @@ def _build_offer_pictures_sheet(
 
     pdf_path = Path(source_pdf_path).resolve()
     _init_sheet_canvas(ws)
-    ws.column_dimensions["A"].width = 100
+    ws.column_dimensions["A"].width = max(100.0, min(130.0, 24.0 + float(_EMBED_MAX_WIDTH_PX) / 85.0))
 
     row = 1
     row = _write_hero_header(ws, row, "Offer pictures", "Property photos from the offering memorandum", 4)
@@ -1490,11 +1657,13 @@ def _build_offer_pictures_sheet(
     )
 
     embedded = 0
+    z = float(_EMBED_RENDER_ZOOM)
+    cap = int(_EMBED_MAX_WIDTH_PX)
     for page_num in pages:
-        png = _render_pdf_page_png(pdf_path, page_num)
+        png = _render_pdf_page_png(pdf_path, page_num, zoom=z)
         if not png:
             continue
-        xl_img = _scaled_xl_image(png)
+        xl_img = _scaled_xl_image(png, max_width_px=cap)
         if xl_img is None:
             continue
 
@@ -1543,10 +1712,7 @@ def build_text_llm_workbook(
         if builder is None:
             continue
         ws = wb.create_sheet(title=sheet_name[:31])
-        if sheet_name == "offer_pictures":
-            ok = builder(ws, data, source_pdf_path=source_pdf_path)
-        else:
-            ok = builder(ws, data)
+        ok = builder(ws, data, source_pdf_path=source_pdf_path)
         if not ok:
             wb.remove(ws)
 

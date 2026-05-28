@@ -1,0 +1,107 @@
+# LangGraph pipeline — loaded via read_config(); built by BuildGraph (Step).
+#
+# nodes:        one schema per leaf; optional ``when`` expression.
+# parallel:     named groups of leaf node ids (run concurrently).
+# edges:        ``to: <parallel_group_name>`` fans out into that group.
+# conditional_edges: ``from: <parallel_group_name>`` after the group completes.
+
+graph:
+  graph_name: extract_om_pdfs
+
+  nodes:
+    extract_metadata:
+      schema: metadata_from_text
+      tier: fast
+      input: page_texts
+
+    extract_pages:
+      schema: page_extraction
+      tier: fast
+      input: page_texts
+
+    extract_building:
+      schema: building_report
+      tier: fast
+      input: page_texts
+
+    extract_demographics:
+      schema: demographics_report
+      tier: fast
+      input: page_texts
+
+    extract_rent_roll:
+      schema: rent_roll_report
+      tier: fast
+      input: page_texts
+      when: >-
+        not contains_any(lower(get('extractions.metadata_from_text.asset_type')),
+        'hotel', 'hospitality', 'lodging', 'resort', 'motel', 'inn', 'hostel', 'casino')
+
+    extract_financial_statement:
+      schema: financial_statement
+      tier: fast
+      input: page_texts
+      when: >-
+        not contains_any(lower(get('extractions.metadata_from_text.asset_type')),
+        'hotel', 'hospitality', 'lodging', 'resort', 'motel', 'inn', 'hostel', 'casino')
+
+    extract_financial_statement_hotel:
+      schema: financial_statement_hotel
+      tier: fast
+      input: page_texts
+      when: >-
+        contains_any(lower(get('extractions.metadata_from_text.asset_type')),
+        'hotel', 'hospitality', 'lodging', 'resort', 'motel', 'inn', 'hostel', 'casino')
+
+    extract_hotel_specific:
+      schema: hotel_specific_report
+      tier: fast
+      input: page_texts
+      when: >-
+        contains_any(lower(get('extractions.metadata_from_text.asset_type')),
+        'hotel', 'hospitality', 'lodging', 'resort', 'motel', 'inn', 'hostel', 'casino')
+
+    extract_amenities:
+      schema: amenities_report
+      tier: fast
+      input: page_texts
+      when: >-
+        contains_any(lower(get('extractions.metadata_from_text.asset_type')),
+        'hotel', 'hospitality', 'lodging', 'resort', 'motel', 'inn', 'hostel', 'casino')
+
+    extract_auction_information:
+      schema: auction_information
+      tier: fast
+      input: page_texts
+
+  parallel:
+    extract_pages_parallel:
+      - extract_building
+      - extract_demographics
+      - extract_rent_roll
+      - extract_financial_statement
+      - extract_financial_statement_hotel
+      - extract_hotel_specific
+      - extract_amenities
+
+  edges:
+    - from: __start__
+      to: extract_metadata
+    - from: extract_metadata
+      to: extract_pages
+    - from: extract_pages
+      to: extract_pages_parallel
+    - from: extract_auction_information
+      to: __end__
+
+  conditional_edges:
+    - from: extract_pages_parallel
+      branches:
+        - label: auction
+          if: >-
+            in_list(lower(coalesce(get('extractions.metadata_from_text.type_of_sale'),
+            get('extractions.metadata_from_text.transaction_type'))),
+            'auction', 'auctions', 'auction sale')
+          to: extract_auction_information
+        - else: true
+          to: __end__

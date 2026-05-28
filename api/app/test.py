@@ -1,6 +1,6 @@
 from src.celery.tasks.parse_orchestrator import PdfParseOrchestrator
 from src.gpt_extraction.pdf_parse_gpt_bridge import PdfParseGptBridge
-from src.celery.tasks.pdf_parse_llm_graph import run_pdf_parse_llm_graph
+from src.gpt_extraction.pdf_parse_llm_graph import run_pdf_parse_llm_graph
 from src.celery.utils.post_process_llm_values import post_process_llm_values
 from src.utils.text_llm_excel import save_parse_excel_export
 
@@ -231,9 +231,9 @@ def run_deduction(paths):
             results[path.name] = ground_truth[path.name]
             continue
 
-        full_text, _, _ = self.extract_text_stats(path)
+        full_text, pages, _ = self.extract_text_stats(path)
 
-        text_llm_by_schema = run_pdf_parse_llm_graph(self._llm, full_text)
+        text_llm_by_schema = run_pdf_parse_llm_graph(self._llm, pages)
         text_llm_by_schema = post_process_llm_values(text_llm_by_schema)
 
         # # save to excel 
@@ -283,6 +283,7 @@ if __name__ == "__main__":
 
 
 ### TODAY
+
 # ==================================================
 # SUB-DICTIONARY            | ACCURACY   | MATCHES/TOTAL
 # ==================================================
@@ -293,30 +294,4 @@ if __name__ == "__main__":
 # demographics_report       |    65.23% | 302/463
 # --------------------------------------------------
 # OVERALL PERFORMANCE       |    55.96% | 1900/3395
-# ==================================================
-
-# -------------NANO gpt 5 -> lots of errors 
-# ==================================================
-# SUB-DICTIONARY            | ACCURACY   | MATCHES/TOTAL
-# ==================================================
-# metadata_from_text        |    79.87% | 238/298
-# rent_roll_report          |    24.56% | 431/1755
-# building_report           |    56.96% | 176/309
-# financial_statement       |    36.74% | 151/411
-# demographics_report       |    64.57% | 297/460
-# --------------------------------------------------
-# OVERALL PERFORMANCE       |    39.99% | 1293/3233
-# ==================================================
-
-# 5x more expensive gemini-2.5-flash -> lots of errors 
-# ==================================================
-# SUB-DICTIONARY            | ACCURACY   | MATCHES/TOTAL
-# ==================================================
-# metadata_from_text        |    91.58% | 272/297
-# rent_roll_report          |    25.30% | 424/1676
-# building_report           |    57.61% | 178/309
-# financial_statement       |    48.81% | 185/379
-# demographics_report       |    60.94% | 284/466
-# --------------------------------------------------
-# OVERALL PERFORMANCE       |    42.95% | 1343/3127
 # ==================================================

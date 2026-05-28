@@ -15,17 +15,15 @@ class Confidence(BaseModel):
 # ==========================================
 
 class PageOfInterest(BaseModel):
-    """Tells from the pdf which page should be put in LLM context for feature extraction """
-    metadata_page: List[int] = Field([], description="List of page numbers where executive summary, offer summary is located")
-    rent_roll_page: Optional[List[int]] = Field(None, description="List of page numbers where the rent roll is located if it exists.")
-    financial_summary_page: Optional[List[int]] = Field(None, description="List of page numbers where the financial summary is located, including expenses, revenues. All the key financials in detail. Give all the pages if multi year.")
-    demographics_page: Optional[List[int]] = Field(None, description="List of page numbers where the demographics is located. Usually 1, 3, 5 miles statistics.")
-    attractiveness_page: Optional[List[int]] = Field(None, description="List of page numbers where the close points of interest are described to tell how good is the property.")
+    """Key pages in the pdf where to find the relevant information."""
+    metadata_page: List[int] = Field([], description="List of 1 to 3 key pages where the executive summary, offer summary is located. Should have a table of key descriptions of the offer.")
+    rent_roll_page: Optional[List[int]] = Field(None, description="List of few key pages where the rent roll numbers are displayed in a table. Give pages where the rent roll tables are.")
+    financial_summary_page: Optional[List[int]] = Field(None, description="List of key pages where the financial details are located: revenue, expenses, net operating income, cap rate. Give pages where the financial tables are.")
+    demographics_page: Optional[List[int]] = Field(None, description="List of key pages where demographic statistics are in a table.")
     auction_page: Optional[List[int]] = Field(None, description="List of page numbers where the auction details is located, if this is an auction.")
     amenities_page: Optional[List[int]] = Field(None, description="List of page numbers where the property amenities are described (parking lot, space to be built, pool, spa, etc.).")
-    building_report_page: Optional[List[int]] = Field(None, description="List of page numbers where the building detail is located, when built, condition, renovated, description, etc.")
+    building_report_page: Optional[List[int]] = Field(None, description="List of key pages where the building description / condition are located. Give the ones with tables and key information details.")
     hotel_specific_page: Optional[List[int]] = Field(None, description="List of page numbers where the hotel specific details are located, such as amenities, rooms, etc. (ex: number of rooms if hotel), if this is a hotel.")
-    property_pictures_page: Optional[List[int]] = Field(None, description="List of page numbers where pictures of the buildings are displayed.")
     
 # ==========================================
 # 1. METADATA (FAST TIER)
@@ -216,7 +214,7 @@ class HotelYearlyData(BaseModel):
     
     # --- BOTTOM LINES ($) ---
     ebitda: Optional[float] = Field(default=None, description="EBITDA / Adjusted GOP (Income Before Non-Operating minus Total Non-Operating Expenses).")
-    ffe_replacement_reserve: Optional[float] = Field(default=None, description="Furniture, Fixtures, and Equipment (FF&E) escrow capital reserve bucket allocation.")
+    replacement_reserve: Optional[float] = Field(default=None, description="Replacement reserve amount.")
     net_operating_income: Optional[float] = Field(default=None, description="Final operational yield baseline: Net Operating Income (EBITDA minus FF&E Replacement Reserve).")
 
 class FinancialStatementExtractionHotel(Confidence):

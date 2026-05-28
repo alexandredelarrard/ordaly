@@ -8,7 +8,7 @@ from typing import Any, Optional
 import pymupdf
 from omegaconf import DictConfig
 
-from src.celery.tasks.pdf_parse_llm_graph import run_pdf_parse_llm_graph
+from src.gpt_extraction.pdf_parse_llm_graph import run_pdf_parse_llm_graph
 from src.utils.pdf_mupdf import open_pdf as open_pdf_sanitized
 from src.celery.utils.post_process_llm_values import post_process_llm_values
 from src.constants import parse_pipeline as PP
@@ -77,11 +77,11 @@ class PdfParseOrchestrator:
         errors: list[str] = []
 
         # extract full text from pdf 
-        full_text, _, stats = self.extract_text_stats(path)
+        full_text, pages, stats = self.extract_text_stats(path)
         native = self.is_likely_native_pdf(full_text, stats)
 
-        # call the graph
-        text_llm_by_schema = run_pdf_parse_llm_graph(self._llm, full_text)
+        # call the graph (per-page list; graph also accepts a single joined str)
+        text_llm_by_schema = run_pdf_parse_llm_graph(self._llm, pages)
         text_llm_by_schema = post_process_llm_values(text_llm_by_schema)
 
         # save to excel 
