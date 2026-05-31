@@ -207,12 +207,14 @@ def evaluator(ground_truth, results, target_sub_dicts):
             agg[sub_dict]["total"] += stats[sub_dict]["total"]
 
     for doc_id, stats in doc_rows:
-        _print_overall_summary_table(agg, target_sub_dicts, title="OVERALL SUMMARY (all PDFs)")
         _print_document_accuracy_table(doc_id, stats, target_sub_dicts)
+
+    _print_overall_summary_table(agg, target_sub_dicts, title="OVERALL SUMMARY (all PDFs)")
 
     grand_matches = sum(agg[s]["matches"] for s in target_sub_dicts)
     grand_total = sum(agg[s]["total"] for s in target_sub_dicts)
     weighted = (grand_matches / grand_total * 100) if grand_total > 0 else 0.0
+    
     return weighted
 
 def run_deduction(paths):
@@ -231,9 +233,9 @@ def run_deduction(paths):
             results[path.name] = ground_truth[path.name]
             continue
 
-        full_text, pages, _ = self.extract_text_stats(path)
+        full_text, _, _ = self.extract_text_stats(path)
 
-        text_llm_by_schema = run_pdf_parse_llm_graph(self._llm, pages)
+        text_llm_by_schema = run_pdf_parse_llm_graph(self._llm, full_text)
         text_llm_by_schema = post_process_llm_values(text_llm_by_schema)
 
         # # save to excel 
@@ -285,13 +287,29 @@ if __name__ == "__main__":
 ### TODAY
 
 # ==================================================
+# OVERALL SUMMARY (all PDFs)
+# ==================================================
+# SUB-DICTIONARY            | ACCURACY   | MATCHES/TOTAL
+# ==================================================
+# metadata_from_text        |    93.29% | 278/298
+# rent_roll_report          |    43.86% | 840/1915
+# building_report           |    65.55% | 196/299
+# financial_statement       |    57.24% | 245/428
+# demographics_report       |    64.45% | 301/467
+# --------------------------------------------------
+# OVERALL PERFORMANCE       |    54.59% | 1860/3407
+# ==================================================
+
+# ==================================================
+# OVERALL SUMMARY (all PDFs)
+# ==================================================
 # SUB-DICTIONARY            | ACCURACY   | MATCHES/TOTAL
 # ==================================================
 # metadata_from_text        |    94.30% | 281/298
-# rent_roll_report          |    46.16% | 889/1926
-# building_report           |    62.54% | 187/299
-# financial_statement       |    58.92% | 241/409
-# demographics_report       |    65.23% | 302/463
+# rent_roll_report          |    44.16% | 850/1925
+# building_report           |    65.55% | 196/299
+# financial_statement       |    57.24% | 245/428
+# demographics_report       |    64.45% | 301/467
 # --------------------------------------------------
-# OVERALL PERFORMANCE       |    55.96% | 1900/3395
+# OVERALL PERFORMANCE       |    54.81% | 1873/3417
 # ==================================================

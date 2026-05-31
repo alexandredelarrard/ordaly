@@ -1,7 +1,7 @@
 gpt:
   default_api: google
   seed: 42
-  temperature: 0.02
+  temperature: 0
   max_token: 8192
 
   google: 

@@ -81,7 +81,7 @@ class PdfParseOrchestrator:
         native = self.is_likely_native_pdf(full_text, stats)
 
         # call the graph (per-page list; graph also accepts a single joined str)
-        text_llm_by_schema = run_pdf_parse_llm_graph(self._llm, pages)
+        text_llm_by_schema = run_pdf_parse_llm_graph(self._llm, full_text)
         text_llm_by_schema = post_process_llm_values(text_llm_by_schema)
 
         # save to excel 
